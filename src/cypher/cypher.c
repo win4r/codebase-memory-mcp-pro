@@ -4262,7 +4262,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     scan_pattern_nodes(store, project, max_rows, &pat0->nodes[0], &scanned, &scan_count);
 
     /* Build initial bindings with early WHERE */
-    int bind_cap = scan_count > 0 ? scan_count : SKIP_ONE;
+    int bind_cap = scan_count > max_rows ? scan_count : (max_rows > 0 ? max_rows : SKIP_ONE);
     binding_t *bindings = malloc((bind_cap + SKIP_ONE) * sizeof(binding_t));
     int bind_count = 0;
     const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : "_n0";

@@ -400,8 +400,8 @@ TEST(incr_modify_file) {
 
     /* Single-file incremental should be faster than full */
     if ((int)ms > (int)(g_full_index_ms * 1.5)) {
-        printf("    [PERF WARNING] incremental slower than 1.5x full: %.0fms vs %.0fms\n",
-               ms, g_full_index_ms);
+        printf("    [PERF WARNING] incremental slower than 1.5x full: %.0fms vs %.0fms\n", ms,
+               g_full_index_ms);
     }
 
     printf("    [perf] modify 1 file: %.0fms (full was %.0fms)\n", ms, g_full_index_ms);
@@ -910,12 +910,12 @@ static int resp_lacks_key(const char *resp, const char *key) {
 }
 
 /* Helper: assert tool call succeeds, warn if slow */
-#define TOOL_OK(resp, ms)                                                              \
-    do {                                                                               \
-        ASSERT((resp) != NULL);                                                        \
-        if ((int)(ms) > PERF_WARN_MS) {                                                \
+#define TOOL_OK(resp, ms)                                                                 \
+    do {                                                                                  \
+        ASSERT((resp) != NULL);                                                           \
+        if ((int)(ms) > PERF_WARN_MS) {                                                   \
             printf("    [PERF WARNING] tool call: %.0fms (>%dms)\n", (ms), PERF_WARN_MS); \
-        }                                                                              \
+        }                                                                                 \
     } while (0)
 
 /* Helper: assert response is not an error */
@@ -928,6 +928,38 @@ TEST(tool_list_projects_basic) {
     char *r = call_tool_timed("list_projects", &ms, "{}");
     TOOL_OK(r, ms);
     ASSERT(strstr(r, "projects") != NULL);
+    free(r);
+    PASS();
+}
+
+TEST(tool_qg_defines_method_more_than_10) {
+    write_file_at("fastapi/big_class.py", "class BigClass:\n"
+                                          "    def m1(self): pass\n"
+                                          "    def m2(self): pass\n"
+                                          "    def m3(self): pass\n"
+                                          "    def m4(self): pass\n"
+                                          "    def m5(self): pass\n"
+                                          "    def m6(self): pass\n"
+                                          "    def m7(self): pass\n"
+                                          "    def m8(self): pass\n"
+                                          "    def m9(self): pass\n"
+                                          "    def m10(self): pass\n"
+                                          "    def m11(self): pass\n"
+                                          "    def m12(self): pass\n"
+                                          "    def m13(self): pass\n"
+                                          "    def m14(self): pass\n"
+                                          "    def m15(self): pass\n");
+    char *idx = index_repo();
+    ASSERT(idx != NULL);
+    free(idx);
+    double ms;
+    char *r = call_tool_timed("query_graph", &ms,
+                              "{\"project\":\"%s\","
+                              "\"query\":\"MATCH (c:Class)-[:DEFINES_METHOD]->(m:Method)"
+                              " WHERE c.name = 'BigClass' RETURN count(m) AS n\"}",
+                              g_project);
+    TOOL_OK(r, ms);
+    ASSERT(strstr(r, "\"15\"") != NULL || strstr(r, "\\\"15\\\"") != NULL);
     free(r);
     PASS();
 }
@@ -3042,6 +3074,7 @@ SUITE(incremental) {
     RUN_TEST(tool_qg_configures);
     RUN_TEST(tool_qg_handles);
     RUN_TEST(tool_qg_defines_method);
+    RUN_TEST(tool_qg_defines_method_more_than_10);
     RUN_TEST(tool_qg_no_limit);
     RUN_TEST(tool_qg_empty_result);
 
