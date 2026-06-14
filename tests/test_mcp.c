@@ -556,6 +556,103 @@ TEST(tool_trace_missing_function_name) {
     PASS();
 }
 
+/* Regression: two same-named definitions with equal rank must be reported
+ * ambiguous, not silently traced (trace_path previously took nodes[0]). */
+TEST(tool_trace_call_path_ambiguous) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "amb-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/amb");
+    cbm_node_t a = {.project = proj,
+                    .label = "Function",
+                    .name = "amb",
+                    .qualified_name = "amb-proj.a.amb",
+                    .file_path = "a.c",
+                    .start_line = 10,
+                    .end_line = 20};
+    cbm_node_t b = {.project = proj,
+                    .label = "Function",
+                    .name = "amb",
+                    .qualified_name = "amb-proj.b.amb",
+                    .file_path = "b.c",
+                    .start_line = 10,
+                    .end_line = 20}; /* equal span -> genuine tie */
+    ASSERT_GT(cbm_store_upsert_node(st, &a), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &b), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":61,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_call_path\","
+             "\"arguments\":{\"function_name\":\"amb\",\"project\":\"amb-proj\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "ambiguous"));
+    ASSERT_NOT_NULL(strstr(inner, "suggestions"));
+    ASSERT_NULL(strstr(inner, "\"callees\""));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Regression: when same-named nodes differ in rank, trace must pick the real
+ * definition (callable, larger body) — NOT nodes[0]. The Module is inserted
+ * first; if trace took nodes[0] the outbound trace would be empty. */
+TEST(tool_trace_call_path_prefers_definition) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "pref-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/pref");
+    /* nodes[0]: the WRONG match (a Module, tiny span), inserted first. */
+    cbm_node_t wrong = {.project = proj,
+                        .label = "Module",
+                        .name = "dup",
+                        .qualified_name = "pref-proj.dup",
+                        .file_path = "dup.x",
+                        .start_line = 1,
+                        .end_line = 1};
+    /* the real definition: a Function with a body. */
+    cbm_node_t def = {.project = proj,
+                      .label = "Function",
+                      .name = "dup",
+                      .qualified_name = "pref-proj.src.dup",
+                      .file_path = "src/dup.c",
+                      .start_line = 10,
+                      .end_line = 50};
+    cbm_node_t callee = {.project = proj,
+                         .label = "Function",
+                         .name = "callee",
+                         .qualified_name = "pref-proj.src.callee",
+                         .file_path = "src/dup.c",
+                         .start_line = 60,
+                         .end_line = 70};
+    ASSERT_GT(cbm_store_upsert_node(st, &wrong), 0);
+    int64_t id_def = cbm_store_upsert_node(st, &def);
+    int64_t id_callee = cbm_store_upsert_node(st, &callee);
+    ASSERT_GT(id_def, 0);
+    ASSERT_GT(id_callee, 0);
+    cbm_edge_t e = {.project = proj, .source_id = id_def, .target_id = id_callee, .type = "CALLS"};
+    cbm_store_insert_edge(st, &e);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":62,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_call_path\",\"arguments\":{\"function_name\":\"dup\","
+             "\"project\":\"pref-proj\",\"direction\":\"outbound\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NULL(strstr(inner, "ambiguous"));
+    /* picked the Function definition -> its outbound CALLS edge to "callee" shows */
+    ASSERT_NOT_NULL(strstr(inner, "callee"));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(tool_delete_project_not_found) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -2069,6 +2166,8 @@ SUITE(mcp) {
     /* Tool handlers with validation */
     RUN_TEST(tool_trace_call_path_not_found);
     RUN_TEST(tool_trace_missing_function_name);
+    RUN_TEST(tool_trace_call_path_ambiguous);
+    RUN_TEST(tool_trace_call_path_prefers_definition);
     RUN_TEST(tool_delete_project_not_found);
     RUN_TEST(tool_get_architecture_empty);
     RUN_TEST(tool_get_architecture_emits_populated_sections);

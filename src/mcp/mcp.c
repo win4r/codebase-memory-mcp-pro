@@ -2245,6 +2245,66 @@ static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_resul
     return arr;
 }
 
+static char *snippet_suggestions(const char *input, cbm_node_t *nodes, int count);
+
+/* Rank a candidate for name resolution. The label tier (callable > class-like >
+ * module/file) is the primary key; WITHIN a tier the larger definition by line
+ * span wins. In practice the .c-over-.h and C-main-over-shell-main preferences
+ * come primarily from span (the real definition has the larger body), since the
+ * competing matches usually share a tier — no file extension is hardcoded.
+ * Consequence: two same-tier candidates with equal span tie and are reported
+ * ambiguous (see pick_resolved_node) rather than guessed. */
+enum {
+    RES_RANK_CALLABLE = 2,     /* Function / Method */
+    RES_RANK_OTHER = 1,        /* Class / Struct / etc. */
+    RES_RANK_MODULE = 0,       /* Module / File */
+    RES_LABEL_WEIGHT = 1000000 /* label tier dominates span */
+};
+static long node_resolution_score(const cbm_node_t *n) {
+    long label_rank = RES_RANK_MODULE;
+    if (n->label) {
+        if (strcmp(n->label, "Function") == 0 || strcmp(n->label, "Method") == 0) {
+            label_rank = RES_RANK_CALLABLE;
+        } else if (strcmp(n->label, "Module") != 0 && strcmp(n->label, "File") != 0) {
+            label_rank = RES_RANK_OTHER;
+        }
+    }
+    long span = (long)n->end_line - (long)n->start_line;
+    if (span < 0) {
+        span = 0;
+    }
+    return label_rank * (long)RES_LABEL_WEIGHT + span;
+}
+
+/* Pick the best-resolving node among name matches. Sets *ambiguous when the top
+ * score is shared by more than one candidate (a genuine tie the caller must
+ * disambiguate) so resolution never silently traces the wrong same-named node. */
+static int pick_resolved_node(const cbm_node_t *nodes, int count, bool *ambiguous) {
+    *ambiguous = false;
+    if (count <= 1) {
+        return 0;
+    }
+    int best = 0;
+    long best_score = node_resolution_score(&nodes[0]);
+    for (int i = 1; i < count; i++) {
+        long s = node_resolution_score(&nodes[i]);
+        if (s > best_score) {
+            best_score = s;
+            best = i;
+        }
+    }
+    int top_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (node_resolution_score(&nodes[i]) == best_score) {
+            top_count++;
+        }
+    }
+    if (top_count > 1) {
+        *ambiguous = true;
+    }
+    return best;
+}
+
 static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     char *func_name = cbm_mcp_get_string_arg(args, "function_name");
     char *project = cbm_mcp_get_string_arg(args, "project");
@@ -2329,6 +2389,22 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(hint, true);
     }
 
+    /* Disambiguate same-named matches: prefer the real definition, and report
+     * ambiguity (rather than silently tracing nodes[0]) on a genuine tie — e.g.
+     * a C main() vs a same-named shell-script main(). */
+    bool trace_ambiguous = false;
+    int sel = pick_resolved_node(nodes, node_count, &trace_ambiguous);
+    if (trace_ambiguous) {
+        char *result = snippet_suggestions(func_name, nodes, node_count);
+        free(func_name);
+        free(project);
+        free(direction);
+        free(mode);
+        free(param_name);
+        cbm_store_free_nodes(nodes, node_count);
+        return result;
+    }
+
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -2354,14 +2430,14 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     cbm_traverse_result_t tr_in = {0};
 
     if (do_outbound) {
-        cbm_store_bfs(store, nodes[0].id, "outbound", edge_types, edge_type_count, depth,
+        cbm_store_bfs(store, nodes[sel].id, "outbound", edge_types, edge_type_count, depth,
                       MCP_BFS_LIMIT, &tr_out);
         yyjson_mut_obj_add_val(doc, root, "callees",
                                bfs_to_json_array(doc, &tr_out, risk_labels, include_tests));
     }
 
     if (do_inbound) {
-        cbm_store_bfs(store, nodes[0].id, "inbound", edge_types, edge_type_count, depth,
+        cbm_store_bfs(store, nodes[sel].id, "inbound", edge_types, edge_type_count, depth,
                       MCP_BFS_LIMIT, &tr_in);
         yyjson_mut_obj_add_val(doc, root, "callers",
                                bfs_to_json_array(doc, &tr_in, risk_labels, include_tests));
@@ -3003,6 +3079,21 @@ static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
     }
 
     if (suffix_count > SKIP_ONE) {
+        /* Prefer the real definition (a .c body over a .h declaration, a Function
+         * over a Module) so an unambiguous-by-preference match resolves directly
+         * instead of forcing a disambiguation round trip; only a genuine tie still
+         * returns suggestions. */
+        bool snip_ambiguous = false;
+        int ssel = pick_resolved_node(suffix_nodes, suffix_count, &snip_ambiguous);
+        if (!snip_ambiguous) {
+            copy_node(&suffix_nodes[ssel], &node);
+            cbm_store_free_nodes(suffix_nodes, suffix_count);
+            char *result = build_snippet_response(srv, &node, "suffix", include_neighbors, NULL, 0);
+            free_node_contents(&node);
+            free(qn);
+            free(project);
+            return result;
+        }
         char *result = snippet_suggestions(qn, suffix_nodes, suffix_count);
         cbm_store_free_nodes(suffix_nodes, suffix_count);
         free(qn);
