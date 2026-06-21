@@ -7,7 +7,43 @@
 > - **MCP tools** — `detect_changes` honors `since` ([#464](https://github.com/DeusData/codebase-memory-mcp/pull/464)); definition-preferred name resolution with ambiguity reporting ([#466](https://github.com/DeusData/codebase-memory-mcp/pull/466)); valid UTF-8 in `get_code_snippet` ([#526](https://github.com/DeusData/codebase-memory-mcp/pull/526)).
 > - **Robustness / build** — stack-buffer-overflow fix in `append_args_json` ([#475](https://github.com/DeusData/codebase-memory-mcp/pull/475)); JSON control-character escaping ([#527](https://github.com/DeusData/codebase-memory-mcp/pull/527)); preserve ADRs across a full re-index ([#539](https://github.com/DeusData/codebase-memory-mcp/pull/539)); libgit2 ≥ 1.8 build fix ([#512](https://github.com/DeusData/codebase-memory-mcp/pull/512)).
 >
-> All credit for the original engine belongs to DeusData. License unchanged — see [LICENSE](LICENSE). The upstream README follows verbatim.
+> All credit for the original engine belongs to DeusData. License unchanged — see [LICENSE](LICENSE).
+
+### 🛠️ Build this fork from source
+
+This fork ships **no prebuilt release binaries** — build the integrated binary yourself. Pure C, Apple clang / gcc, zero external runtime dependencies:
+
+```bash
+git clone https://github.com/win4r/codebase-memory-mcp-pro.git
+cd codebase-memory-mcp-pro
+./scripts/build.sh          # → build/c/codebase-memory-mcp   (reports version: dev)
+```
+
+The first build compiles all 158 vendored tree-sitter grammars (a few minutes); for iterative rebuilds `make -j -f Makefile.cbm cbm` is much faster. The macOS **libgit2 ≥ 1.8 build fix (#512)** is already integrated, so a Homebrew `libgit2` compiles cleanly.
+
+Install on your PATH and wire it into Claude Code as an MCP server:
+
+```bash
+cp build/c/codebase-memory-mcp ~/.local/bin/
+
+# stdio MCP server, available in all projects:
+claude mcp add codebase-memory -s user -- ~/.local/bin/codebase-memory-mcp
+# tools: index_repository, query_graph, trace_path, get_code_snippet, detect_changes … (14 total)
+```
+
+Confirm the integrated fixes are live (e.g. **#465** — node properties survive a `WITH` aggregation, which returns blank on stock upstream):
+
+```bash
+codebase-memory-mcp cli index_repository '{"repo_path":"/path/to/repo"}'
+codebase-memory-mcp cli query_graph '{"project":"<name>","query":"MATCH (a)-[:CALLS]->(b) WITH b, count(a) AS c RETURN b.file_path, c LIMIT 1"}'
+# a non-empty file_path means you are running the cherry-picked build
+```
+
+> ⚠️ **Do not run the binary's `update` subcommand** — it pulls the official upstream release and overwrites this integrated build. Re-run `./scripts/build.sh` to update instead.
+
+---
+
+*The upstream README follows.*
 
 [![GitHub Release](https://img.shields.io/github/v/release/DeusData/codebase-memory-mcp?style=flat&color=blue)](https://github.com/DeusData/codebase-memory-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
