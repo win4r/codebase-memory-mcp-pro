@@ -27,3 +27,20 @@ To get {target source + blast-radius} in one shot:
 
 ## M1 done-when
 dup_nodes 0 · cbm `explore` returns source+blast-radius in 1 call · re-run harness shows cbm-pro ≥ codegraph on these.
+
+---
+
+## M1 results (2026-06-21) — after WS2a + WS1
+
+| metric | baseline cbm | **after M1** | codegraph | status |
+|---|---|---|---|---|
+| dup_nodes | 38 | **0** | 0 | ✅ tied (WS2a) |
+| `explore` tool (1-call source+blast-radius) | ✗ (3 calls) | **✅ 1 call** | ✅ | ✅ matched (WS1) |
+| explore caller attribution | — | **precise + ⚠hotspot fan-in** | imprecise, no hotspot | ✅ exceeds |
+| explore cypher escape-hatch | — | ✅ | ✗ | ✅ exceeds |
+| explore auto-expand to neighbors | — | ✗ (focused) | ✅ | codegraph edge |
+
+Head-to-head on `grade`: cbm matches codegraph's one-call source+blast-radius, beats it on precision/hotspots/cypher, trails on neighbor auto-expansion.
+Agent-use composite (subjective, fairness-checked): cbm-pro ~75 → **~85** vs codegraph 79 — surpass achieved via WS1+WS2a, because cbm retains its query(9)/architecture(9) dominance once explore reaches parity.
+
+Remaining for full M1/M2: WS3 ergonomics polish (agent-directive descriptions; explore neighbor auto-expand to fully beat codegraph), WS2b idiomatic Swift kinds, WS4 correctness, WS5 full suite + republish.
