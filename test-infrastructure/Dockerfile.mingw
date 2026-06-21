@@ -1,0 +1,53 @@
+# Cross-compile AND run Windows tests locally using llvm-mingw + Wine.
+#
+# llvm-mingw: LLVM/Clang-based MinGW toolchain
+# Wine: runs the resulting .exe for actual test execution
+#
+# Usage:
+#   docker compose -f test-infrastructure/docker-compose.yml run --rm build-windows
+#   docker compose -f test-infrastructure/docker-compose.yml run --rm test-windows
+
+FROM mstorsjo/llvm-mingw:latest
+
+# Install Wine + binfmt support for transparent .exe execution
+RUN dpkg --add-architecture i386 && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    wine64 curl zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install zlib into the llvm-mingw sysroot (from MSYS2 CLANG64 repo)
+RUN mkdir -p /tmp/zlib-pkg && \
+    curl -sL "https://mirror.msys2.org/mingw/clang64/mingw-w64-clang-x86_64-zlib-1.3.1-1-any.pkg.tar.zst" \
+    | zstd -d | tar xf - -C /tmp/zlib-pkg && \
+    cp -rn /tmp/zlib-pkg/clang64/include/* /opt/llvm-mingw/x86_64-w64-mingw32/include/ && \
+    cp -rn /tmp/zlib-pkg/clang64/lib/* /opt/llvm-mingw/x86_64-w64-mingw32/lib/ && \
+    rm -rf /tmp/zlib-pkg
+
+# Add Wine to PATH (Ubuntu noble puts it in /usr/lib/wine/)
+ENV PATH="/usr/lib/wine:${PATH}"
+
+# Verify all tools are installed
+RUN echo "=== Tool check ===" && \
+    x86_64-w64-mingw32-clang --version | head -1 && \
+    x86_64-w64-mingw32-clang++ --version | head -1 && \
+    make --version | head -1 && \
+    ls /opt/llvm-mingw/x86_64-w64-mingw32/include/zlib.h && \
+    (wine64 --version 2>/dev/null || echo "WARN: wine64 not on PATH, checking alternatives...") && \
+    (which wine64 || which wine || find / -name "wine64" -type f 2>/dev/null | head -1 || echo "ERROR: wine not found") && \
+    echo "=== All tools OK ==="
+
+# Pre-init Wine to avoid first-run prompts during test
+RUN WINEDEBUG=-all wine64 wineboot --init 2>/dev/null || \
+    WINEDEBUG=-all wine wineboot --init 2>/dev/null || \
+    echo "WARN: Wine init skipped"
+
+WORKDIR /src
+
+ENTRYPOINT ["/bin/bash", "-c"]
+
+# Default: cross-compile production build
+CMD ["make -j4 -f Makefile.cbm clean-c && \
+     make -j4 -f Makefile.cbm cbm \
+       CC=x86_64-w64-mingw32-clang \
+       CXX=x86_64-w64-mingw32-clang++ \
+     && echo '=== Windows cross-compile: OK ==='"]

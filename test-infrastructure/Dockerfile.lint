@@ -1,0 +1,32 @@
+# Lint environment — mirrors CI lint job exactly:
+#   - clang-format-20 (from LLVM apt repo)
+#   - cppcheck 2.20.0 (built from source, same as CI)
+#
+# Build:  docker build -t cbm-lint -f test-infrastructure/Dockerfile.lint test-infrastructure/
+# Run:    docker run --rm -v $(pwd):/src cbm-lint
+
+FROM ubuntu:noble
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ make cmake \
+    libsqlite3-dev zlib1g-dev \
+    pkg-config wget gnupg git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# clang-format-20 (same version as CI)
+RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
+    && echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" > /etc/apt/sources.list.d/llvm-20.list \
+    && apt-get update && apt-get install -y --no-install-recommends clang-format-20 \
+    && rm -rf /var/lib/apt/lists/*
+
+# cppcheck 2.20.0 (same version as CI)
+RUN git clone --depth 1 --branch 2.20.0 https://github.com/danmar/cppcheck.git /tmp/cppcheck \
+    && cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release -DHAVE_RULES=OFF -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /tmp/cppcheck/build -j$(nproc) \
+    && cmake --install /tmp/cppcheck/build \
+    && rm -rf /tmp/cppcheck
+
+WORKDIR /src
+
+ENTRYPOINT ["scripts/lint.sh"]
+CMD ["CLANG_FORMAT=clang-format-20"]

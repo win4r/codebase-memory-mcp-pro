@@ -1,0 +1,174 @@
+# Local test environment — mirrors GitHub Actions CI for ALL platforms.
+#
+# Coverage:
+#   Linux arm64:  native test + build (mirrors CI ubuntu-24.04-arm)
+#   Linux amd64:  QEMU test + build (mirrors CI ubuntu-latest)
+#   Windows:      cross-compile with mingw-w64 (catches all compile errors)
+#   macOS:        run natively — scripts/test.sh CC=cc && scripts/build.sh CC=cc
+
+services:
+  # ── Linux test (ASan + UBSan + LeakSanitizer) ──────────────
+  test:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile
+    platform: linux/arm64
+    volumes:
+      - ..:/src
+    command: ["CC=gcc", "CXX=g++"]
+
+  test-amd64:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+    command: ["CC=gcc", "CXX=g++"]
+
+  # ── Linux production build (-O2 -Werror) ───────────────────
+  build:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile
+    platform: linux/arm64
+    volumes:
+      - ..:/src
+    entrypoint: ["scripts/build.sh"]
+    command: ["CC=gcc", "CXX=g++"]
+
+  build-amd64:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+    entrypoint: ["scripts/build.sh"]
+    command: ["CC=gcc", "CXX=g++"]
+
+  # ── Windows cross-compile + test (llvm-mingw + Wine) ────────
+  build-windows:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.mingw
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+
+  test-windows:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.mingw
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+    command: >-
+      make -j4 -f Makefile.cbm clean-c &&
+      make -j4 -f Makefile.cbm build/c/test-runner
+        CC=x86_64-w64-mingw32-clang
+        CXX=x86_64-w64-mingw32-clang++ &&
+      echo '=== Running tests under Wine ===' &&
+      WINEDEBUG=-all wine64 build/c/test-runner.exe &&
+      echo '=== Windows test: OK ==='
+
+  # ── Smoke test (build + run smoke-test.sh) ──────────────────
+  smoke:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile
+    platform: linux/arm64
+    volumes:
+      - ..:/src
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        scripts/build.sh CC=gcc CXX=g++ &&
+        scripts/smoke-test.sh ./build/c/codebase-memory-mcp
+
+  smoke-amd64:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        scripts/build.sh CC=gcc CXX=g++ &&
+        scripts/smoke-test.sh ./build/c/codebase-memory-mcp
+
+  # ── Windows smoke (cross-compile + Wine) ──────────────────
+  smoke-windows:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.mingw
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        scripts/build.sh CC=x86_64-w64-mingw32-clang CXX=x86_64-w64-mingw32-clang++ &&
+        mv build/c/codebase-memory-mcp build/c/codebase-memory-mcp.exe 2>/dev/null || true &&
+        WINEDEBUG=-all scripts/smoke-test.sh ./build/c/codebase-memory-mcp.exe
+
+  # ── Windows soak (cross-compile + Wine) ───────────────────
+  soak-windows:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.mingw
+    platform: linux/amd64
+    volumes:
+      - ..:/src
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        scripts/build.sh CC=x86_64-w64-mingw32-clang CXX=x86_64-w64-mingw32-clang++ &&
+        mv build/c/codebase-memory-mcp build/c/codebase-memory-mcp.exe 2>/dev/null || true &&
+        CBM_DIAGNOSTICS=1 WINEDEBUG=-all scripts/soak-test.sh ./build/c/codebase-memory-mcp.exe 10
+
+  # ── Linux portable (Alpine musl static) ────────────────────
+  test-portable:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.alpine
+    platform: linux/arm64
+    volumes:
+      - ..:/src
+    entrypoint: ["bash", "scripts/test.sh"]
+    command: ["CC=gcc", "CXX=g++"]
+
+  build-portable:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.alpine
+    platform: linux/arm64
+    volumes:
+      - ..:/src
+    entrypoint: ["bash", "scripts/build.sh"]
+    command: ["CC=gcc", "CXX=g++", "STATIC=1"]
+
+  smoke-portable:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.alpine
+    platform: linux/arm64
+    volumes:
+      - ..:/src
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        scripts/build.sh CC=gcc CXX=g++ STATIC=1 &&
+        file build/c/codebase-memory-mcp | grep -q "statically linked" &&
+        echo "=== Verified: statically linked ===" &&
+        scripts/smoke-test.sh ./build/c/codebase-memory-mcp
+
+  # ── Lint ────────────────────────────────────────────────────
+  lint:
+    build:
+      context: ..
+      dockerfile: test-infrastructure/Dockerfile.lint
+    volumes:
+      - ..:/src

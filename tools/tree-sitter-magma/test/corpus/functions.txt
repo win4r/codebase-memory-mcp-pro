@@ -1,0 +1,77 @@
+================
+Simple function
+================
+
+function Factorial(n)
+  if n le 1 then
+    return 1;
+  end if;
+  return n * Factorial(n - 1);
+end function;
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (parameter_list
+      (parameter (identifier)))
+    (if_statement
+      (binary_expression
+        (identifier)
+        (number))
+      (return_statement (number)))
+    (return_statement
+      (binary_expression
+        (identifier)
+        (call_expression
+          name: (identifier)
+          (binary_expression
+            (identifier)
+            (number)))))))
+
+================
+Procedure with tilde
+================
+
+procedure Swap(~x, ~y)
+  t := x;
+  x := y;
+  y := t;
+end procedure;
+
+---
+
+(source_file
+  (procedure_definition
+    name: (identifier)
+    (parameter_list
+      (parameter (identifier))
+      (parameter (identifier)))
+    (assignment_statement (identifier) (identifier))
+    (assignment_statement (identifier) (identifier))
+    (assignment_statement (identifier) (identifier))))
+
+================
+Intrinsic with type
+================
+
+intrinsic MyAdd(x::RngIntElt, y::RngIntElt) -> RngIntElt
+  { Returns x+y }
+  return x + y;
+end intrinsic;
+
+---
+
+(source_file
+  (intrinsic_definition
+    name: (identifier)
+    (parameter_list
+      (parameter (identifier) (identifier))
+      (parameter (identifier) (identifier)))
+    (identifier)
+    (doc_string)
+    (return_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))

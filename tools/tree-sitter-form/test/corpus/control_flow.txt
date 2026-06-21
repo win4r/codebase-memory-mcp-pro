@@ -1,0 +1,32 @@
+==================
+If statement
+==================
+
+if (count(x, 1) > 0)
+  id x = 0;
+endif;
+
+---
+
+(source_file
+  (if_statement
+    (binary_expression
+      (function_application
+        name: (identifier)
+        (identifier)
+        (number))
+      (number))
+    (substitution_statement
+      (identifier)
+      (number))))
+
+==================
+Module sort
+==================
+
+.sort
+
+---
+
+(source_file
+  (module_directive))

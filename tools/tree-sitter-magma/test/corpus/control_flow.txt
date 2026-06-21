@@ -1,0 +1,60 @@
+================
+For loop with in
+================
+
+for p in PrimesUpTo(100) do
+  print p;
+end for;
+
+---
+
+(source_file
+  (for_statement
+    (identifier)
+    (call_expression
+      name: (identifier)
+      (number))
+    (print_statement (identifier))))
+
+================
+While loop
+================
+
+while n gt 0 do
+  n := n - 1;
+end while;
+
+---
+
+(source_file
+  (while_statement
+    (binary_expression
+      (identifier)
+      (number))
+    (assignment_statement
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number)))))
+
+================
+Case statement
+================
+
+case t:
+  when 1:
+    x := 10;
+  when 2:
+    x := 20;
+  else
+    x := 0;
+end case;
+
+---
+
+(source_file
+  (case_statement
+    (identifier)
+    (when_clause (number) (assignment_statement (identifier) (number)))
+    (when_clause (number) (assignment_statement (identifier) (number)))
+    (else_clause (assignment_statement (identifier) (number)))))

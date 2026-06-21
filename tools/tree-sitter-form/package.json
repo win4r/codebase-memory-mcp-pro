@@ -1,0 +1,21 @@
+{
+  "name": "tree-sitter-form",
+  "version": "0.1.0",
+  "description": "FORM (symbolic manipulation) grammar for tree-sitter",
+  "main": "bindings/node",
+  "keywords": ["tree-sitter", "form", "symbolic-computation", "particle-physics"],
+  "license": "MIT",
+  "dependencies": {
+    "nan": "^2.18.0"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.form",
+      "file-types": ["frm", "prc"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+==================
+Simple procedure
+==================
+
+#procedure simplify(expr)
+  id x = 1;
+#endprocedure
+
+---
+
+(source_file
+  (procedure_definition
+    name: (identifier)
+    (identifier)
+    (substitution_statement
+      (identifier)
+      (number))))
+
+==================
+Procedure call
+==================
+
+#call simplify(result)
+
+---
+
+(source_file
+  (call_statement
+    name: (identifier)
+    (identifier)))

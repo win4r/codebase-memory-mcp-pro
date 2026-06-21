@@ -1,0 +1,53 @@
+==================
+Symbol declaration
+==================
+
+Symbols a, b, c;
+
+---
+
+(source_file
+  (declaration_statement
+    (identifier)
+    (identifier)
+    (identifier)))
+
+==================
+Function declaration
+==================
+
+Functions f, g;
+
+---
+
+(source_file
+  (declaration_statement
+    (identifier)
+    (identifier)))
+
+==================
+Vector declaration
+==================
+
+Vectors p1, p2, q;
+
+---
+
+(source_file
+  (declaration_statement
+    (identifier)
+    (identifier)
+    (identifier)))
+
+==================
+Index declaration
+==================
+
+Indices mu, nu;
+
+---
+
+(source_file
+  (declaration_statement
+    (identifier)
+    (identifier)))

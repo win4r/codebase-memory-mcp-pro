@@ -1,0 +1,407 @@
+# Release pipeline: lint → test → build → smoke/soak → draft → verify → publish
+#
+# Security (security-static + codeql-gate) starts immediately and runs in
+# parallel with lint/test/build/smoke/soak. It only blocks the final verify
+# step — everything else proceeds independently.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.8.0)"
+        required: true
+        type: string
+      release_notes:
+        description: "Release notes (optional — auto-generated from commits if empty)"
+        required: false
+        type: string
+      replace:
+        description: "Replace existing release if it exists"
+        required: false
+        type: boolean
+        default: false
+      soak_level:
+        description: 'Soak: full (quick+asan), quick (10min), none'
+        type: choice
+        options: ['full', 'quick', 'none']
+        default: 'quick'
+      skip_perf:
+        description: "Skip performance tests (use when no pipeline logic changed)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Security (starts immediately, blocks only verify) ───────────
+  security:
+    uses: ./.github/workflows/_security.yml
+    secrets: inherit
+
+  # ── 1. Lint (cppcheck + clang-format) ───────────────────────────
+  lint:
+    uses: ./.github/workflows/_lint.yml
+
+  # ── 2. Tests (all platforms, full suite for release) ────────────
+  test:
+    needs: [lint]
+    uses: ./.github/workflows/_test.yml
+    with:
+      skip_perf: ${{ inputs.skip_perf }}
+
+  # ── 3. Build all platforms ──────────────────────────────────────
+  build:
+    needs: [test]
+    uses: ./.github/workflows/_build.yml
+    with:
+      version: ${{ inputs.version }}
+
+  # ── 4. Smoke test every binary ──────────────────────────────────
+  smoke:
+    needs: [build]
+    uses: ./.github/workflows/_smoke.yml
+
+  # ── 5. Soak tests ──────────────────────────────────────────────
+  soak:
+    if: ${{ inputs.soak_level != 'none' }}
+    needs: [build]
+    uses: ./.github/workflows/_soak.yml
+    with:
+      duration_minutes: 10
+      run_asan: ${{ inputs.soak_level == 'full' }}
+      version: ${{ inputs.version }}
+
+  # ── 6. Create DRAFT release ────────────────────────────────────
+  release-draft:
+    needs: [smoke, soak]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la *.tar.gz *.zip
+
+      - name: Generate checksums
+        run: sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: '*.tar.gz,*.zip,checksums.txt'
+
+      - name: Generate SBOM
+        run: |
+          python3 -c "
+          import json
+          sbom = {
+            'spdxVersion': 'SPDX-2.3',
+            'dataLicense': 'CC0-1.0',
+            'SPDXID': 'SPDXRef-DOCUMENT',
+            'name': 'codebase-memory-mcp-${{ inputs.version }}',
+            'documentNamespace': 'https://github.com/DeusData/codebase-memory-mcp/releases/${{ inputs.version }}',
+            'creationInfo': {
+              'created': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+              'creators': ['Tool: codebase-memory-mcp-release-pipeline']
+            },
+            'packages': [
+              {'SPDXID': 'SPDXRef-Package-sqlite3', 'name': 'sqlite3', 'versionInfo': '3.51.3', 'licenseDeclared': 'blessing', 'downloadLocation': 'https://sqlite.org', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-yyjson', 'name': 'yyjson', 'versionInfo': '0.12.0', 'licenseDeclared': 'MIT', 'downloadLocation': 'https://github.com/ibireme/yyjson', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-mimalloc', 'name': 'mimalloc', 'versionInfo': '3.3.2', 'licenseDeclared': 'MIT', 'downloadLocation': 'https://github.com/microsoft/mimalloc', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-xxhash', 'name': 'xxhash', 'versionInfo': '0.8.3', 'licenseDeclared': 'BSD-2-Clause', 'downloadLocation': 'https://github.com/Cyan4973/xxHash', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-tre', 'name': 'tre', 'versionInfo': '0.8.0', 'licenseDeclared': 'BSD-2-Clause', 'downloadLocation': 'https://github.com/laurikari/tre', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-tree-sitter', 'name': 'tree-sitter', 'versionInfo': '0.24.4', 'licenseDeclared': 'MIT', 'downloadLocation': 'https://github.com/tree-sitter/tree-sitter', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-lz4', 'name': 'lz4', 'versionInfo': '1.10.0', 'licenseDeclared': 'BSD-2-Clause', 'downloadLocation': 'https://github.com/lz4/lz4', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-zstd', 'name': 'zstd', 'versionInfo': '1.5.7', 'licenseDeclared': 'BSD-3-Clause', 'downloadLocation': 'https://github.com/facebook/zstd', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-simplecpp', 'name': 'simplecpp', 'versionInfo': '1.x', 'licenseDeclared': '0BSD', 'downloadLocation': 'https://github.com/danmar/simplecpp', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-verstable', 'name': 'verstable', 'versionInfo': '2.2.1', 'licenseDeclared': 'MIT', 'downloadLocation': 'https://github.com/JacksonAllan/Verstable', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-wyhash', 'name': 'wyhash', 'versionInfo': 'final-4.3', 'licenseDeclared': 'Unlicense', 'downloadLocation': 'https://github.com/wangyi-fudan/wyhash', 'filesAnalyzed': False},
+              {'SPDXID': 'SPDXRef-Package-nomic-embed-code', 'name': 'nomic-embed-code-token-embeddings', 'versionInfo': '1.0', 'licenseDeclared': 'Apache-2.0', 'downloadLocation': 'https://huggingface.co/nomic-ai/nomic-embed-code', 'filesAnalyzed': False, 'comment': 'Derived int8 token embeddings; see vendored/nomic/NOTICE'},
+              {'SPDXID': 'SPDXRef-Package-tree-sitter-grammars', 'name': 'tree-sitter-grammars-aggregate', 'versionInfo': '158-grammars', 'licenseDeclared': 'MIT', 'downloadLocation': 'NOASSERTION', 'filesAnalyzed': False, 'comment': 'Aggregate of 158 vendored tree-sitter grammars. Predominantly MIT; exceptions: clojure CC0-1.0, jinja2 + just Apache-2.0, first-party grammars (c) DeusData MIT. Per-grammar provenance: internal/cbm/vendored/grammars/MANIFEST.md; full texts ship in THIRD_PARTY_NOTICES.md inside each archive.'}
+            ]
+          }
+          json.dump(sbom, open('sbom.json', 'w'), indent=2)
+          "
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: '*.tar.gz'
+          sbom-path: 'sbom.json'
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts
+        run: |
+          for f in *.tar.gz *.zip checksums.txt; do
+            cosign sign-blob --yes --bundle "${f}.bundle" "$f"
+          done
+
+      - name: Delete existing release
+        if: ${{ inputs.replace }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: gh release delete "$VERSION" --yes --cleanup-tag || true
+
+      - name: Create tag
+        env:
+          VERSION: ${{ inputs.version }}
+        # Tag the DISPATCHED sha, not the checkout HEAD: the artifacts were
+        # built from github.sha, and a commit pushed to main mid-run must not
+        # move the release tag. (A floating HEAD also broke the 0.8.0 release:
+        # HEAD had become a commit touching .github/workflows/, and the App
+        # token may not create refs pointing at workflow-modifying commits.)
+        run: |
+          git tag -f "$VERSION" "$GITHUB_SHA"
+          git push origin "$VERSION" --force
+
+      - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2
+        with:
+          tag_name: ${{ inputs.version }}
+          draft: true
+          files: |
+            *.tar.gz
+            *.zip
+            checksums.txt
+            sbom.json
+            *.bundle
+          body: ${{ inputs.release_notes || '' }}
+          generate_release_notes: ${{ inputs.release_notes == '' }}
+
+  # ── 7. Verify + Publish (requires security gate) ───────────────
+  verify:
+    needs: [release-draft, security]
+    # Explicit condition: a skipped ancestor (soak with soak_level=none) must
+    # not skip the publish chain — only real failures/cancellations block it.
+    if: ${{ !cancelled() && !failure() && needs.release-draft.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Download and extract release binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p assets binaries
+          gh release download "$VERSION" --dir assets --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --pattern '*.zip'
+          for f in assets/*.tar.gz; do
+            NAME=$(basename "$f" .tar.gz)
+            tar -xzf "$f" -C binaries/ 2>/dev/null || true
+            [ -f binaries/codebase-memory-mcp ] && mv binaries/codebase-memory-mcp "binaries/${NAME}"
+          done
+          for f in assets/*.zip; do
+            NAME=$(basename "$f" .zip)
+            unzip -o "$f" -d binaries/ 2>/dev/null || true
+            [ -f binaries/codebase-memory-mcp.exe ] && mv binaries/codebase-memory-mcp.exe "binaries/${NAME}.exe"
+          done
+          cp install.sh binaries/ 2>/dev/null || true
+          cp install.ps1 binaries/ 2>/dev/null || true
+          ls -la binaries/
+
+      - name: Security audits on all release files
+        run: |
+          # Audit every file that ships in the release archives — binaries,
+          # install scripts, LICENSE, and any future companion files.
+          # security-strings.sh detects file type and applies binary-only
+          # rules (URL allowlist, dangerous-command detection) only to real
+          # binaries; for shell scripts it still runs credential and base64
+          # pattern audits.
+          for f in binaries/*; do
+            [ -f "$f" ] || continue
+            echo "--- Auditing: $(basename "$f") ---"
+            scripts/security-strings.sh "$f"
+          done
+
+      - name: VirusTotal scan
+        uses: crazy-max/ghaction-virustotal@936d8c5c00afe97d3d9a1af26d017cfdf26800a2 # v5.0.0
+        id: virustotal
+        with:
+          vt_api_key: ${{ secrets.VIRUS_TOTAL_SCANNER_API_KEY }}
+          files: binaries/*
+
+      - name: Wait for VirusTotal results
+        env:
+          VT_API_KEY: ${{ secrets.VIRUS_TOTAL_SCANNER_API_KEY }}
+          VT_ANALYSIS: ${{ steps.virustotal.outputs.analysis }}
+        run: scripts/ci/check-virustotal.sh
+
+      - name: Append VirusTotal scan links to release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Hash the extracted binaries (not the archives — VT indexes binary hashes)
+          TABLE="\n\n## Security Verification\n\n"
+          TABLE+="All release binaries scanned with 70+ antivirus engines — **0 detections**.\n\n"
+          TABLE+="| Binary | SHA-256 | VirusTotal |\n"
+          TABLE+="|--------|---------|------------|\n"
+
+          for bin in binaries/codebase-memory-mcp-*; do
+            [ -f "$bin" ] || continue
+            name=$(basename "$bin")
+            # Skip UI variants and non-binary files
+            echo "$name" | grep -qE \
+              '^codebase-memory-mcp-(linux|darwin|windows)-(amd64|arm64)(\.exe)?$' || continue
+            sha256=$(sha256sum "$bin" 2>/dev/null | awk '{print $1}' \
+              || shasum -a 256 "$bin" | awk '{print $1}')
+            label=$(echo "$name" \
+              | sed 's/^codebase-memory-mcp-//' \
+              | sed 's/\.exe$//')
+            short="${sha256:0:20}..."
+            vt_url="https://www.virustotal.com/gui/file/${sha256}/detection"
+            TABLE+="| \`${label}\` | \`${short}\` | [0/72 ✅](${vt_url}) |\n"
+          done
+
+          CURRENT=$(gh release view "$VERSION" \
+            --json body --jq '.body // ""' --repo "$GITHUB_REPOSITORY")
+          printf '%s%b' "$CURRENT" "$TABLE" > /tmp/release_notes.md
+          gh release edit "$VERSION" \
+            --notes-file /tmp/release_notes.md --repo "$GITHUB_REPOSITORY"
+
+  # ── 8. Publish package wrappers (npm + PyPI) ──────────────────
+  # Wrappers in pkg/npm and pkg/pypi download the released binary at
+  # install time, so they only need a version bump (already in the repo
+  # at this point) — no per-release sha256 substitution.
+  #
+  # Runs against the still-DRAFT GitHub release. If publish fails, the
+  # release stays in draft so we can re-run without a half-shipped state.
+  publish-registries:
+    needs: [verify]
+    if: ${{ !cancelled() && !failure() && needs.verify.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # for npm provenance
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # The packaged versions MUST match the dispatched release version —
+      # the 0.8.0 release failed here because pkg/npm still carried the
+      # previous release's hand-pinned version and npm refuses to publish
+      # over an existing version. Inject the dispatch input so a forgotten
+      # manual bump can never fail the pipeline again. (server.json needs
+      # no injection: publish-mcp-registry syncs it from pkg/npm.)
+      - name: Sync packaging versions to the release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          V="${RELEASE_VERSION#v}"
+          jq --arg v "$V" '.version = $v' pkg/npm/package.json > pkg/npm/package.tmp
+          mv pkg/npm/package.tmp pkg/npm/package.json
+          sed -i "s/^version = \".*\"/version = \"$V\"/" pkg/pypi/pyproject.toml
+          grep -q "\"version\": \"$V\"" pkg/npm/package.json
+          grep -q "^version = \"$V\"" pkg/pypi/pyproject.toml
+          echo "packaging synced to $V"
+
+      # ── npm ──────────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npm
+        working-directory: pkg/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      # ── PyPI ─────────────────────────────────────────────────
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Build PyPI distribution
+        working-directory: pkg/pypi
+        run: |
+          # Pin to specific versions (typosquatting / supply-chain mitigation).
+          # OSSF scorecard prefers --require-hashes, but that needs full
+          # transitive deps; version pinning is the practical compromise.
+          python -m pip install --upgrade 'build==1.3.0' 'twine==6.2.0'
+          python -m build
+
+      - name: Publish to PyPI
+        working-directory: pkg/pypi
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload --non-interactive dist/*
+
+  # ── 8b. Publish server.json to the official MCP Registry ──────
+  # Runs after npm + PyPI so the registry can verify package ownership
+  # (npm: `mcpName` field in package.json; PyPI: `mcp-name:` marker in
+  # the package README). Authenticates with GitHub Actions OIDC — no
+  # token, no interactive device flow. server.json's version is synced
+  # from the just-published npm package so it always matches the release.
+  #
+  # Intentionally does NOT gate publish-final: the binary release is the
+  # product, the registry entry is metadata. A registry-preview outage
+  # must never block shipping. Re-run this job alone to retry — it does
+  # not touch npm/PyPI, so retries are safe.
+  publish-mcp-registry:
+    needs: [publish-registries]
+    if: ${{ !cancelled() && !failure() && needs.publish-registries.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # GitHub OIDC auth to the MCP Registry
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Sync server.json version to the released package
+        env:
+          # The dispatch input is the authoritative release version —
+          # pkg/npm/package.json can lag behind it in the dispatched commit.
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${RELEASE_VERSION#v}"
+          jq --arg v "$VERSION" '.version = $v | (.packages[].version) = $v' \
+            server.json > server.tmp && mv server.tmp server.json
+          echo "server.json pinned to $VERSION"
+          cat server.json
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json to MCP Registry
+        run: ./mcp-publisher publish
+
+  # ── 9. Atomic un-draft (only after npm + PyPI succeed) ────────
+  # The GitHub release stays in DRAFT until both registries publish.
+  # If anything upstream fails, the draft can be deleted and the run
+  # re-tried with replace=true — no half-shipped state visible to users.
+  publish-final:
+    needs: [verify, publish-registries]
+    if: ${{ !cancelled() && !failure() && needs.verify.result == 'success' && needs.publish-registries.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Un-draft GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: gh release edit "$VERSION" --draft=false --repo "$GITHUB_REPOSITORY"

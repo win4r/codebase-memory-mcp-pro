@@ -1,0 +1,16 @@
+{
+  "grammars": [
+    {
+      "name": "form",
+      "camelcase": "Form",
+      "scope": "source.form",
+      "path": ".",
+      "file-types": ["frm", "prc"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "FORM (symbolic manipulation) grammar for tree-sitter"
+  }
+}

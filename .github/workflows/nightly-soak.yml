@@ -1,0 +1,22 @@
+# Weekly soak test: 4h sustained load + ASan leak detection
+name: Nightly Soak
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # Every Sunday at 2am UTC
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Soak duration in minutes (default: 240 = 4h)'
+        type: number
+        default: 240
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    uses: ./.github/workflows/_soak.yml
+    with:
+      duration_minutes: ${{ inputs.duration_minutes || 240 }}
+      run_asan: true

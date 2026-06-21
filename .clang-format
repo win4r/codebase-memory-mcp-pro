@@ -1,0 +1,61 @@
+---
+# .clang-format — Code formatting for C11 codebase.
+#
+# Style: K&R braces, 4-space indent, 100-column limit.
+# Equivalent to Go's gofmt for consistent formatting.
+
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# Column limit
+ColumnLimit: 100
+
+# Braces: K&R style (same line)
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+
+# Pointer alignment: right (matches our style: const char* name)
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+# Includes: keep grouped
+IncludeBlocks: Preserve
+SortIncludes: Never
+
+# Switch/case
+IndentCaseLabels: false
+IndentCaseBlocks: false
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Left
+AlignOperands: true
+AlignTrailingComments: true
+
+# Penalties (prefer breaking after return type for long signatures)
+PenaltyBreakAssignment: 2
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyReturnTypeOnItsOwnLine: 200
+
+# Keep existing formatting for macro-heavy code
+ForEachMacros:
+  - CBM_DYN_ARRAY_FOREACH
+...

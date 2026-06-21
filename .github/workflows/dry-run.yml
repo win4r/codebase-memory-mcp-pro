@@ -1,0 +1,76 @@
+# Manual trigger: test everything before pushing a release.
+# Each step can be skipped for faster iteration.
+#
+# Pipeline:  lint → test → build → smoke/soak   (sequential chain)
+# Security:  security-static + codeql-gate       (independent island)
+#
+# Security does NOT block lint/test/build/smoke/soak. All jobs must pass
+# for the overall workflow to be green.
+name: Dry Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_lint:
+        description: 'Skip lint (cppcheck + clang-format)'
+        type: boolean
+        default: false
+      skip_tests:
+        description: 'Skip unit/integration tests'
+        type: boolean
+        default: false
+      skip_builds:
+        description: 'Skip build + smoke'
+        type: boolean
+        default: false
+      soak_level:
+        description: 'Soak: full (quick+asan), quick (10min), none'
+        type: choice
+        options: ['full', 'quick', 'none']
+        default: 'quick'
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Security (independent island — does not block main pipeline) ──
+  security:
+    uses: ./.github/workflows/_security.yml
+    secrets: inherit
+
+  # ── Lint (cppcheck + clang-format) ────────────────────────────
+  lint:
+    if: ${{ inputs.skip_lint != true }}
+    uses: ./.github/workflows/_lint.yml
+
+  # ── Tests (all platforms, perf tests skipped on CI) ────────────
+  test:
+    needs: [lint]
+    if: ${{ inputs.skip_tests != true && !cancelled() && (needs.lint.result == 'success' || needs.lint.result == 'skipped') }}
+    uses: ./.github/workflows/_test.yml
+    with:
+      skip_perf: true
+
+  # ── Build all platforms ────────────────────────────────────────
+  build:
+    if: ${{ inputs.skip_builds != true && !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    needs: [test]
+    uses: ./.github/workflows/_build.yml
+
+  # ── Smoke test every binary ────────────────────────────────────
+  # Run unless builds were skipped or a build leg FAILED. Every build leg
+  # (including the macos-15-intel darwin-amd64 binary) is blocking now, so a
+  # failed/missing platform binary correctly stops smoke — see _build.yml.
+  smoke:
+    if: ${{ inputs.skip_builds != true && !cancelled() && needs.build.result != 'failure' && needs.build.result != 'skipped' }}
+    needs: [build]
+    uses: ./.github/workflows/_smoke.yml
+
+  # ── Soak tests (optional, parallel with smoke) ────────────────
+  soak:
+    if: ${{ inputs.soak_level != 'none' && !cancelled() && needs.build.result != 'failure' && needs.build.result != 'skipped' }}
+    needs: [build]
+    uses: ./.github/workflows/_soak.yml
+    with:
+      duration_minutes: 10
+      run_asan: ${{ inputs.soak_level == 'full' }}

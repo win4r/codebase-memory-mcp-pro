@@ -1,0 +1,16 @@
+{
+  "grammars": [
+    {
+      "name": "magma",
+      "camelcase": "Magma",
+      "scope": "source.magma",
+      "path": ".",
+      "file-types": ["mag", "magma"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Magma computer algebra grammar for tree-sitter"
+  }
+}
