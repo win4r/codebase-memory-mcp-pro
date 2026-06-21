@@ -341,6 +341,7 @@ TEST(server_handle_tools_list) {
     ASSERT_NOT_NULL(strstr(resp, "\"id\":2"));
     ASSERT_NOT_NULL(strstr(resp, "search_graph"));
     ASSERT_NOT_NULL(strstr(resp, "query_graph"));
+    ASSERT_NOT_NULL(strstr(resp, "\"explore\"")); /* registered + its inputSchema is valid JSON */
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -412,6 +413,34 @@ TEST(tool_unknown_tool) {
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* explore (WS1): missing query → clean required-field error, no crash. */
+TEST(tool_explore_requires_query) {
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":"
+             "\"explore\",\"arguments\":{\"project\":\"none\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
+    ASSERT_NOT_NULL(strstr(resp, "query is required"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* explore (WS1): unindexed project → clean error envelope, no crash (exercises the
+ * store-resolution + cleanup paths of handle_explore on an empty server). */
+TEST(tool_explore_unindexed_no_crash) {
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":"
+             "\"explore\",\"arguments\":{\"query\":\"foo bar\",\"project\":\"nope\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
+    free(resp);
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -2223,6 +2252,8 @@ SUITE(mcp) {
     RUN_TEST(tool_list_projects_empty);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
+    RUN_TEST(tool_explore_requires_query);
+    RUN_TEST(tool_explore_unindexed_no_crash);
     RUN_TEST(tool_search_graph_basic);
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_query_graph_basic);
