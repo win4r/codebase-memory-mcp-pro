@@ -4595,7 +4595,7 @@ static void expl_put_numbered(expl_buf_t *b, const char *src, int start_line) {
     for (const char *p = src; *p;) {
         const char *nl = strchr(p, '\n');
         size_t linelen = nl ? (size_t)(nl - p) : strlen(p);
-        char *line = strndup(p, linelen);
+        char *line = cbm_strndup(p, linelen);
         expl_putf(b, "%5d\t%s\n", ln++, line ? line : "");
         free(line);
         if (!nl) {
