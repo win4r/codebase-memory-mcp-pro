@@ -59,3 +59,7 @@ soak-results/
 
 # LSP originality-check reference cache (scripts/check-lsp-originality.sh)
 .lsp-refs/
+
+# Local-only tooling state
+.omo/
+.codebase-memory/
