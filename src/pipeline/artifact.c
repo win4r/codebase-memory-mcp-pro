@@ -105,25 +105,30 @@ static int write_file_atomic(const char *path, const char *data, size_t len) {
     return 0;
 }
 
-/* Get current git HEAD hash. buf must be >= CBM_SZ_64. Returns false on error. */
+/* Get current git HEAD hash. buf must be >= CBM_SZ_64. Returns false on error.
+ *
+ * Shell-free spawn + sha40 validator: even if the child's stdout is polluted
+ * (AutoRun banner, GCM hint, hook output), the validator rejects every line
+ * that isn't a 40-char hex sha. */
 static bool git_head_hash(const char *repo_path, char *buf, size_t bufsz) {
-    char cmd[CBM_SZ_1K];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse HEAD 2>/dev/null", repo_path);
-    FILE *fp = cbm_popen(cmd, "r");
-    if (!fp) {
+    if (buf && bufsz > 0) {
         buf[0] = '\0';
+    }
+    if (!repo_path || !buf || bufsz < 41) {
         return false;
     }
-    buf[0] = '\0';
-    if (fgets(buf, (int)bufsz, fp)) {
-        /* Strip trailing newline */
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len - ART_NUL] == '\n' || buf[len - ART_NUL] == '\r')) {
-            buf[--len] = '\0';
-        }
+
+    const char *argv[] = {"git", "-C", repo_path, "--no-pager", "rev-parse", "HEAD", NULL};
+    char *out = NULL;
+    int rc = cbm_spawn_capture_validated("git", argv, &out, cbm_validator_sha40_hex, NULL);
+    if (rc != 0 || !out) {
+        free(out);
+        return false;
     }
-    (void)cbm_pclose(fp);
-    return buf[0] != '\0';
+    /* cbm_validator_sha40_hex guarantees strlen(out) == 40, fits CBM_SZ_64. */
+    snprintf(buf, bufsz, "%s", out);
+    free(out);
+    return true;
 }
 
 /* Generate ISO 8601 timestamp into buf. */

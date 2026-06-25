@@ -224,23 +224,21 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
         return CBM_NOT_FOUND;
     }
 
-    char cmd[CBM_SZ_1K];
-#ifdef _WIN32
-    /* cmd.exe does not recognize single quotes, and '/dev/null' is a POSIX path. */
-    const char *null_dev = "NUL";
-#else
-    const char *null_dev = "/dev/null";
-#endif
-    /* git -C "<path>" works on both cmd.exe and POSIX shells. Double quotes are
-     * safe here because cbm_validate_shell_arg (above) rejects ", $, `, \ and the
-     * other shell metacharacters that would otherwise be active inside them. */
-    snprintf(cmd, sizeof(cmd),
-             "git -C \"%s\" log --name-only --pretty=format:COMMIT:%%H:%%ct "
-             "--since=\"1 year ago\" --max-count=10000 2>%s",
-             repo_path, null_dev);
-
-    FILE *fp = cbm_popen(cmd, "r");
-    if (!fp) {
+    /* Shell-free spawn: argv array passed directly to CreateProcessW / execvp.
+     * AutoRun banners / GCM hints / hook output cannot leak into stdout here.
+     * No validator needed — git log output is self-describing (COMMIT:<hash>:<ts>
+     * markers + filenames), so non-conforming lines are naturally skipped below. */
+    const char *argv[] = {
+        "git", "-C", repo_path, "--no-pager", "log", "--name-only",
+        "--pretty=format:COMMIT:%H:%ct",
+        "--since=1 year ago", "--max-count=10000",
+        NULL,
+    };
+    char *raw = NULL;
+    size_t raw_len = 0;
+    int rc = cbm_spawn_capture("git", argv, &raw, &raw_len);
+    if (rc != 0 || !raw) {
+        free(raw);
         return CBM_NOT_FOUND;
     }
 
@@ -249,38 +247,50 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
     int count = 0;
     commit_t current = {0};
 
-    char line[CBM_SZ_1K];
-    while (fgets(line, sizeof(line), fp)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - SKIP_ONE] == '\n' || line[len - SKIP_ONE] == '\r')) {
-            line[--len] = '\0';
+    /* Walk raw line-by-line. memchr (not strchr) — defensive against any
+     * stray NUL the child might emit. */
+    const char *p = raw;
+    const char *end = raw + raw_len;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+
+        char line[CBM_SZ_1K];
+        size_t copy_len = len;
+        if (copy_len >= sizeof(line)) {
+            copy_len = sizeof(line) - 1;
         }
-        if (len == 0) {
-            continue;
+        memcpy(line, p, copy_len);
+        line[copy_len] = '\0';
+        while (copy_len > 0 && (line[copy_len - 1] == '\r' || line[copy_len - 1] == '\n')) {
+            line[--copy_len] = '\0';
         }
 
-        if (strncmp(line, "COMMIT:", SLEN("COMMIT:")) == 0) {
-            if (current.count > 0) {
-                if (count >= cap) {
-                    cap *= PAIR_LEN;
-                    commits = safe_realloc(commits, cap * sizeof(commit_t));
+        if (copy_len > 0) {
+            if (strncmp(line, "COMMIT:", SLEN("COMMIT:")) == 0) {
+                if (current.count > 0) {
+                    if (count >= cap) {
+                        cap *= PAIR_LEN;
+                        commits = safe_realloc(commits, cap * sizeof(commit_t));
+                    }
+                    commits[count++] = current;
+                    memset(&current, 0, sizeof(current));
                 }
-                commits[count++] = current;
-                memset(&current, 0, sizeof(current));
+                /* Parse the unix timestamp from "COMMIT:<hash>:<unix_epoch>".
+                 * Older callers / stripped-down git output without %ct land on 0. */
+                const char *hash_end = strchr(line + SLEN("COMMIT:"), ':');
+                if (hash_end) {
+                    current.timestamp = strtoll(hash_end + 1, NULL, 10);
+                }
+            } else if (cbm_is_trackable_file(line)) {
+                commit_add_file(&current, line);
             }
-            /* Parse the unix timestamp from "COMMIT:<hash>:<unix_epoch>".
-             * Older callers / stripped-down git output without %ct land on 0. */
-            const char *hash_end = strchr(line + SLEN("COMMIT:"), ':');
-            if (hash_end) {
-                current.timestamp = strtoll(hash_end + 1, NULL, 10);
-            }
-            continue;
         }
 
-        if (cbm_is_trackable_file(line)) {
-            commit_add_file(&current, line);
-        }
+        if (!nl) break;
+        p = nl + 1;
     }
+
     if (current.count > 0) {
         if (count >= cap) {
             cap *= PAIR_LEN;
@@ -291,7 +301,7 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
         commit_free(&current);
     }
 
-    cbm_pclose(fp);
+    free(raw);
     *out = commits;
     *out_count = count;
     return 0;

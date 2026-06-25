@@ -1,0 +1,14 @@
+# 手动触发：一次性构建所有平台二进制
+# 直接复用上游的 _build.yml reusable workflow（fork 完整继承），零定制、零 secrets。
+name: Build All Platforms
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build all platforms
+    uses: ./.github/workflows/_build.yml

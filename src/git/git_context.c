@@ -11,10 +11,6 @@
 #include <string.h>
 #include <sys/stat.h>
 
-enum {
-    GIT_CMD_MAX = 1024,
-    GIT_OUTPUT_MAX = 4096,
-};
 
 static char *git_strdup(const char *s) {
     if (!s) {
@@ -29,15 +25,6 @@ static char *git_strdup(const char *s) {
     return out;
 }
 
-static void trim_newlines(char *s) {
-    if (!s) {
-        return;
-    }
-    size_t n = strlen(s);
-    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) {
-        s[--n] = '\0';
-    }
-}
 
 static bool git_validate_repo_path(const char *repo_path) {
     if (!cbm_validate_shell_arg(repo_path)) {
@@ -53,6 +40,30 @@ static bool git_validate_repo_path(const char *repo_path) {
     return true;
 }
 
+
+/* Split a space-separated args string into argv tokens (max 8). All current
+ * callers pass simple "subcmd --flag arg" forms with no quoting needed. */
+static int split_args(char *buf, const char **out, int max) {
+    int n = 0;
+    char *p = buf;
+    while (*p && n < max) {
+        while (*p == ' ') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        out[n++] = p;
+        while (*p && *p != ' ') {
+            p++;
+        }
+        if (*p) {
+            *p++ = '\0';
+        }
+    }
+    return n;
+}
+
 static int git_capture(const char *repo_path, const char *git_args, char **out) {
     if (!out) {
         return CBM_NOT_FOUND;
@@ -62,38 +73,44 @@ static int git_capture(const char *repo_path, const char *git_args, char **out) 
         return CBM_NOT_FOUND;
     }
 
-    char cmd[GIT_CMD_MAX];
-#ifdef _WIN32
-    const char *null_dev = "NUL";
-#else
-    const char *null_dev = "/dev/null";
-#endif
-    /* Double quotes work for POSIX shells and cmd.exe. cbm_validate_shell_arg()
-     * rejects quote/backslash/substitution metacharacters before interpolation. */
-    int n = snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s 2>%s", repo_path, git_args, null_dev);
-    if (n < 0 || n >= (int)sizeof(cmd)) {
+    /* Tokenize git_args ("rev-parse --show-toplevel" → ["rev-parse","--show-toplevel"]).
+     * cbm_spawn_capture_validated passes argv directly to CreateProcessW / execvp —
+     * no shell, no cmd.exe, no AutoRun. */
+    char args_buf[CBM_SZ_256];
+    snprintf(args_buf, sizeof(args_buf), "%s", git_args);
+    const char *tail[8] = {0};
+    int targc = split_args(args_buf, tail, 8);
+    if (targc == 0) {
         return CBM_NOT_FOUND;
     }
 
-    FILE *fp = cbm_popen(cmd, "r");
-    if (!fp) {
-        return CBM_NOT_FOUND;
+    /* Build full argv: git -C <repo> --no-pager <args...>. --no-pager routes
+     * output straight to stdout (avoids SUPPRESS_LESS_PIPE fallbacks). */
+    const char *argv[16] = {0};
+    int argc = 0;
+    argv[argc++] = "git";
+    argv[argc++] = "-C";
+    argv[argc++] = repo_path;
+    argv[argc++] = "--no-pager";
+    for (int i = 0; i < targc && argc < 15; i++) {
+        argv[argc++] = tail[i];
     }
 
-    char buf[GIT_OUTPUT_MAX];
-    if (!fgets(buf, sizeof(buf), fp)) {
-        cbm_pclose(fp);
-        return CBM_NOT_FOUND;
+    /* Pick validator by subcommand shape. NULL = no validation (raw output). */
+    cbm_line_validator_t v = NULL;
+    if (strcmp(tail[0], "rev-parse") == 0) {
+        if (targc >= 2 && strcmp(tail[1], "--verify") == 0) {
+            v = cbm_validator_sha40_hex; /* rev-parse --verify HEAD → sha40 */
+        } else {
+            v = cbm_validator_git_path; /* rev-parse --show-toplevel / --git-dir / --git-common-dir */
+        }
+    } else if (strcmp(tail[0], "symbolic-ref") == 0) {
+        v = cbm_validator_branch_name;
+    } else if (strcmp(tail[0], "merge-base") == 0) {
+        v = cbm_validator_sha40_hex;
     }
-    trim_newlines(buf);
 
-    int rc = cbm_pclose(fp);
-    if (rc != 0 || buf[0] == '\0') {
-        return CBM_NOT_FOUND;
-    }
-
-    *out = git_strdup(buf);
-    return *out ? 0 : CBM_NOT_FOUND;
+    return cbm_spawn_capture_validated("git", (const char *const *)argv, out, v, NULL);
 }
 
 static bool path_is_absolute(const char *path) {
