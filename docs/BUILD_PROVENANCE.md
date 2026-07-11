@@ -12,11 +12,13 @@ paths replayed.
 
 | Surface | Identity | Verification |
 | --- | --- | --- |
-| Clean source branch | `codex/codebase-memory-p0-clean`, based on `3ff76d29a639c5be2ca27c943ce2f87de141b73c` | 45 modified/added paths replayed; zero tracked deletions |
+| Clean source branch | `codex/codebase-memory-p0-clean`, based on `3ff76d29a639c5be2ca27c943ce2f87de141b73c` | 44 retained source/doc/test paths plus one generated-asset ignore rule; zero tracked deletions |
+| Clean implementation commit | `4db726249e328e86070396d58853ccfe560f9f41` | Source used for the final installed executable |
 | Pre-cleanup safety snapshot | `codex/dirty-snapshot-20260711` at `b8b1108087d5327f89a3310f88c3660b5860ca5d` | Preserves the complete original dirty state, including prior deletions |
-| Installed executable | `/Users/wangyukai/.local/bin/codebase-memory-mcp` | SHA-256 `158534554ce54819b0222658a43f27c7c110b5f0afbaaafdef3073407efaad1d` |
-| Installed build identity | `0.8.1-dev` | Build ID `p0.20260711.3ff76d29a639.dirty.r2` |
-| Previous executable backup | `/Users/wangyukai/.local/bin/codebase-memory-mcp.pre-p0-20260711` | SHA-256 `663fefe9d30bfb6602819bb85f103e3ce10e591e4c54c7a2e51b38e97163f911` |
+| Installed executable | `/Users/wangyukai/.local/bin/codebase-memory-mcp` | SHA-256 `6dc55e0084aa2d9840f34d9f7c5459e3fc07136e7f48caae78c37100f3041c1b` |
+| Installed build identity | `0.8.1-dev`, commit `4db726249e32`, clean | Build ID `p0.20260711.4db726249e32.clean.r1` |
+| Previous dirty-build backup | `/Users/wangyukai/.local/bin/codebase-memory-mcp.pre-clean-20260711-1743` | SHA-256 `158534554ce54819b0222658a43f27c7c110b5f0afbaaafdef3073407efaad1d` |
+| Original pre-P0 backup | `/Users/wangyukai/.local/bin/codebase-memory-mcp.pre-p0-20260711` | SHA-256 `663fefe9d30bfb6602819bb85f103e3ce10e591e4c54c7a2e51b38e97163f911` |
 | Personal plugin source | `/Users/wangyukai/plugins/codebase-memory-mcp-pro` | Contract smoke passed |
 | Installed plugin cache | `/Users/wangyukai/.codex/plugins/cache/personal/codebase-memory-mcp-pro/0.1.0+codex.20260628162445` | Contract smoke passed |
 
@@ -41,6 +43,9 @@ truth. It reports schema version 1, 17 tools, `ui_assets=false`, `explore`,
   build completed successfully with a 17-tool, schema-1 manifest.
 - The local shell's inherited `TMPDIR` did not exist, so clean verification used
   `TMPDIR=/tmp`; the initial failure was environmental and occurred before tests.
+- Six resurfaced sync-conflict files with a ` 2` suffix were moved unchanged to
+  ignored `build/duplicates-20260711/`; they were not included in either feature
+  commit or installed build.
 
 Existing MCP processes were deliberately not killed during installation. They
 continue running their previously loaded executable image until Codex starts a
