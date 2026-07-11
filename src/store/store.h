@@ -55,6 +55,15 @@ typedef struct {
 
 typedef struct {
     const char *project;
+    const char *source_fingerprint;
+    const char *extractor_id;
+    int file_count;
+    int mode;
+    bool complete;
+} cbm_index_metadata_t;
+
+typedef struct {
+    const char *project;
     const char *rel_path;
     const char *sha256;
     int64_t mtime_ns;
@@ -270,6 +279,13 @@ int cbm_store_upsert_project(cbm_store_t *s, const char *name, const char *root_
 int cbm_store_get_project(cbm_store_t *s, const char *name, cbm_project_t *out);
 int cbm_store_list_projects(cbm_store_t *s, cbm_project_t **out, int *count);
 int cbm_store_delete_project(cbm_store_t *s, const char *name);
+
+/* Freshness metadata is separate from projects so direct SQLite writer files
+ * remain backward compatible and old indexes naturally classify as partial. */
+int cbm_store_upsert_index_metadata(cbm_store_t *s, const cbm_index_metadata_t *metadata);
+int cbm_store_get_index_metadata(cbm_store_t *s, const char *project,
+                                 cbm_index_metadata_t *out);
+void cbm_index_metadata_free_fields(cbm_index_metadata_t *metadata);
 
 /* ── Node CRUD ──────────────────────────────────────────────────── */
 

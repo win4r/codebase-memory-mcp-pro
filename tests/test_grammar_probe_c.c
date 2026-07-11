@@ -67,7 +67,7 @@ static cbm_store_t *gp_open_indexed(GP_Proj *lp) {
     lp->srv = cbm_mcp_server_new(NULL);
     if (!lp->srv) return NULL;
     char args[700];
-    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"background\":false}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
     return cbm_store_open_path(lp->dbpath);

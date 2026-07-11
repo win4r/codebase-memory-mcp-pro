@@ -2531,11 +2531,17 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                       empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
                       empty_types, NULL, empty_types, NULL, NULL, tree_sitter_yaml, NULL},
 
-    // CBM_LANG_PINE — Pine Script (TradingView). kvarenzn/tree-sitter-pine (ISC).
-    [CBM_LANG_PINE] = {CBM_LANG_PINE, pine_func_types, pine_class_types, empty_types,
-                       pine_module_types, pine_call_types, empty_types, empty_types,
-                       pine_branch_types, pine_var_types, pine_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_pine, NULL},
+// CBM_LANG_PINE — Pine Script (TradingView). kvarenzn/tree-sitter-pine (ISC).
+[CBM_LANG_PINE] = {CBM_LANG_PINE, pine_func_types, pine_class_types, empty_types,
+pine_module_types, pine_call_types, empty_types, empty_types,
+pine_branch_types, pine_var_types, pine_assign_types, empty_types, NULL,
+empty_types, NULL, NULL, tree_sitter_pine, NULL},
+
+// CBM_LANG_T100_4GL — T100/TIPTOP 4GL-family text extractor (no tree-sitter grammar).
+[CBM_LANG_T100_4GL] = {CBM_LANG_T100_4GL, empty_types, empty_types, empty_types,
+empty_types, empty_types, empty_types, empty_types,
+empty_types, empty_types, empty_types, empty_types, NULL,
+empty_types, NULL, NULL, NULL, NULL},
 
 };
 

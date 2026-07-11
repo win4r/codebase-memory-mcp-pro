@@ -131,7 +131,7 @@ static int integration_setup(void) {
 
     /* Index our temp project via MCP tool handler */
     char args[512];
-    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", g_tmpdir);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"background\":false}", g_tmpdir);
     char *resp = cbm_mcp_handle_tool(g_srv, "index_repository", args);
     if (!resp)
         return -1;
@@ -556,7 +556,7 @@ TEST(index_reports_excluded_subtrees_issue411) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
     char args[600];
-    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"background\":false}", tmp);
     char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
     ASSERT_NOT_NULL(resp);
 

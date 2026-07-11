@@ -306,10 +306,11 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
          /* Swift idiomatic type kinds — must be registry symbols so CALLS to enum/
           * struct statics (e.g. SM2.review) and INHERITS/conformance resolve. (WS2b) */
          strcmp(def->label, "Struct") == 0 || strcmp(def->label, "Enum") == 0 ||
-         strcmp(def->label, "Actor") == 0 ||
-         strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
-         /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
-         strcmp(def->label, "EnumCase") == 0)) {
+        strcmp(def->label, "Actor") == 0 ||
+        strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
+        strcmp(def->label, "Table") == 0 ||
+        /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
+        strcmp(def->label, "EnumCase") == 0)) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
@@ -486,6 +487,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         const char *path = files[i].path;
         const char *rel = files[i].rel_path;
         CBMLanguage lang = files[i].language;
+        cbm_pipeline_progress_update(ctx->pipeline, "definitions", rel, i, file_count);
 
         /* Read source file */
         int source_len = 0;
@@ -530,6 +532,8 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             cbm_free_result(result);
         }
     }
+
+    cbm_pipeline_progress_update(ctx->pipeline, "definitions", "", file_count, file_count);
 
     /* Phase 2: now that all extraction results are cached and Module
      * nodes for every file are in the graph, walk the cache again to

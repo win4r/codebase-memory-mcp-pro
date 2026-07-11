@@ -629,10 +629,10 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
  * Mode-skipped hash rows are preserved across the rebuild so subsequent
  * reindexes can correctly distinguish "never indexed" from "indexed but
  * not visited this pass". */
-static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *project,
-                             cbm_file_info_t *files, int file_count,
-                             const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
-                             const char *repo_path) {
+static int dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *project,
+                            cbm_file_info_t *files, int file_count,
+                            const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
+                            const char *repo_path, cbm_index_mode_t mode) {
     struct timespec t;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
 
@@ -647,10 +647,28 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
     int dump_rc = cbm_gbuf_dump_to_sqlite(gbuf, db_path);
     cbm_log_info("incremental.dump", "rc", itoa_buf(dump_rc), "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
+    if (dump_rc != 0) {
+        return dump_rc;
+    }
 
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
     if (hash_store) {
         persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
+
+        char source_fingerprint[96] = "";
+        int fingerprint_file_count = 0;
+        int fingerprint_rc = cbm_pipeline_compute_source_fingerprint(
+            repo_path, mode, source_fingerprint, sizeof(source_fingerprint),
+            &fingerprint_file_count);
+        cbm_index_metadata_t metadata = {
+            .project = project,
+            .source_fingerprint = source_fingerprint,
+            .extractor_id = cbm_pipeline_extractor_id(),
+            .file_count = file_count + mode_skipped_count,
+            .mode = (int)mode,
+            .complete = fingerprint_rc == 0 && fingerprint_file_count == file_count,
+        };
+        int metadata_rc = cbm_store_upsert_index_metadata(hash_store, &metadata);
 
         /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
          * any triggers that could have kept nodes_fts synchronized, so we
@@ -667,12 +685,20 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
         }
 
         cbm_store_close(hash_store);
+        if (!metadata.complete || metadata_rc != CBM_STORE_OK) {
+            cbm_log_error("incremental.err", "phase", "persist_metadata");
+            return CBM_NOT_FOUND;
+        }
+    } else {
+        cbm_log_error("incremental.err", "phase", "open_dumped_store");
+        return CBM_NOT_FOUND;
     }
 
     /* Auto-update artifact if one already exists (persistence was enabled previously) */
     if (repo_path && cbm_artifact_exists(repo_path)) {
         cbm_artifact_export(db_path, repo_path, project, CBM_ARTIFACT_FAST);
     }
+    return 0;
 }
 
 /* ── Incremental pipeline entry point ────────────────────────────── */
@@ -810,6 +836,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_path_alias_collection_t *path_aliases = cbm_load_path_aliases(cbm_pipeline_repo_path(p));
 
     cbm_pipeline_ctx_t ctx = {
+        .pipeline = p,
         .project_name = project,
         .repo_path = cbm_pipeline_repo_path(p),
         .gbuf = existing,
@@ -850,11 +877,12 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
      * reindex can correctly classify those files instead of seeing them
      * as never-existed; also exports a fast-mode artifact when one is
      * already present alongside the repo). */
-    dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
-                     mode_skipped_count, cbm_pipeline_repo_path(p));
+    int dump_rc = dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
+                                   mode_skipped_count, cbm_pipeline_repo_path(p),
+                                   (cbm_index_mode_t)cbm_pipeline_get_mode(p));
     free_mode_skipped(mode_skipped, mode_skipped_count);
     cbm_gbuf_free(existing);
 
     cbm_log_info("incremental.done", "elapsed_ms", itoa_buf((int)elapsed_ms(t0)));
-    return 0;
+    return dump_rc;
 }

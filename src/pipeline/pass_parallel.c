@@ -469,6 +469,7 @@ typedef struct __attribute__((aligned(CBM_CACHE_LINE))) {
 } extract_worker_state_t;
 
 typedef struct {
+    cbm_pipeline_t *pipeline;
     const cbm_file_info_t *files;
     file_sort_entry_t *sorted;
     int file_count;
@@ -483,10 +484,30 @@ typedef struct {
     _Atomic int64_t *shared_ids;
     _Atomic int *cancelled;
     _Atomic int next_file_idx;
+    _Atomic int completed_files;
 
     cbm_pkg_entries_t *pkg_entries; /* per-worker manifest arrays (separate allocation) */
     _Atomic int64_t retained_bytes; /* total source bytes copied into result arenas */
 } extract_ctx_t;
+
+static void extract_progress_start(extract_ctx_t *ec, const cbm_file_info_t *fi) {
+    cbm_pipeline_progress_update(ec->pipeline, "extracting", fi->rel_path,
+                                 atomic_load_explicit(&ec->completed_files,
+                                                      memory_order_relaxed),
+                                 ec->file_count);
+}
+
+static void extract_progress_complete(extract_ctx_t *ec, const cbm_file_info_t *fi) {
+    int done = atomic_fetch_add_explicit(&ec->completed_files, SKIP_ONE,
+                                         memory_order_relaxed) + SKIP_ONE;
+    cbm_pipeline_progress_update(ec->pipeline, "extracting",
+                                 done == ec->file_count ? "" : fi->rel_path, done,
+                                 ec->file_count);
+    if (done % PP_LOG_INTERVAL == 0 || done == ec->file_count) {
+        cbm_log_info("parallel.extract.progress", "done", itoa_log(done), "total",
+                     itoa_log(ec->file_count));
+    }
+}
 
 /* Insert one definition node (and its route if present) into the local gbuf. */
 static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info_t *fi,
@@ -569,12 +590,14 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
 
         int file_idx = ec->sorted[sort_pos].idx;
         const cbm_file_info_t *fi = &ec->files[file_idx];
+        extract_progress_start(ec, fi);
 
         /* Read + extract */
         int source_len = 0;
         char *source = read_file(fi->path, &source_len);
         if (!source) {
             ws->errors++;
+            extract_progress_complete(ec, fi);
             continue;
         }
 
@@ -596,6 +619,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
             log_extract_fail(sort_pos, file_elapsed_ms, fi->rel_path);
             free_source(source);
             ws->errors++;
+            extract_progress_complete(ec, fi);
             continue;
         }
         log_extract_done(sort_pos, file_elapsed_ms, result->defs.count, fi->rel_path);
@@ -653,11 +677,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
         /* Cache result (arena + extracted data, no tree) for Phase 3B and Phase 4 */
         ec->result_cache[file_idx] = result;
 
-        /* Progress logging: log every 10 files (atomic read, no contention) */
-        if ((sort_pos + SKIP_ONE) % PP_LOG_INTERVAL == 0 || sort_pos + SKIP_ONE == ec->file_count) {
-            cbm_log_info("parallel.extract.progress", "done", itoa_log(sort_pos + SKIP_ONE),
-                         "total", itoa_log(ec->file_count));
-        }
+        extract_progress_complete(ec, fi);
 
         /* Reclaim all slab + tier2 memory between files.
          *
@@ -758,6 +778,7 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     cbm_pkg_entries_t *pkg_entries = calloc(worker_count, sizeof(cbm_pkg_entries_t));
 
     extract_ctx_t ec = {
+        .pipeline = ctx->pipeline,
         .files = files,
         .sorted = sorted,
         .file_count = file_count,
@@ -772,6 +793,7 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     };
     atomic_init(&ec.next_worker_id, 0);
     atomic_init(&ec.next_file_idx, 0);
+    atomic_init(&ec.completed_files, 0);
     atomic_init(&ec.retained_bytes, 0);
 
     /* Sub-phase: Dispatch workers (parse + extract per file, PARALLEL) */
@@ -827,6 +849,7 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
         strcmp(def->label, "Struct") == 0 || strcmp(def->label, "Enum") == 0 ||
         strcmp(def->label, "Actor") == 0 ||
         strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
+        strcmp(def->label, "Table") == 0 ||
         /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
         strcmp(def->label, "EnumCase") == 0) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);

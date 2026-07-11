@@ -53,15 +53,30 @@ CFLAGS_COMMON = -std=c11 -D_DEFAULT_SOURCE -D_GNU_SOURCE -Wall -Wextra -Werror \
                 -I$(CBM_DIR) -I$(TS_INCLUDE) \
                 $(LIBGIT2_FLAGS)
 
+# Current macOS CLT releases ship libc++ headers inside the selected SDK while
+# the driver can still prefer an incomplete legacy include directory.  Keep the
+# SDK include explicit so preprocessor.cpp has the same standard library in CI
+# and local clean builds.
+CBM_MACOS_SDK := $(shell xcrun --show-sdk-path 2>/dev/null)
+CXX_SDK_STDLIB_FLAGS := $(if $(CBM_MACOS_SDK),-isystem $(CBM_MACOS_SDK)/usr/include/c++/v1,)
+
 CXXFLAGS_COMMON = -std=c++14 -Wall -Wextra -Werror \
                   -Wno-unused-parameter \
-                  -I$(CBM_DIR) -I$(TS_INCLUDE)
+                  -I$(CBM_DIR) -I$(TS_INCLUDE) $(CXX_SDK_STDLIB_FLAGS)
 
 # Production flags (CFLAGS_EXTRA allows CI to inject -DCBM_VERSION)
+# Build provenance is derived at build time so every production executable can
+# identify the exact source state that produced it.
+CBM_GIT_COMMIT_VALUE := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+CBM_GIT_DIRTY_VALUE := $(shell if test -n "$$(git status --porcelain --untracked-files=all 2>/dev/null)"; then echo dirty; else echo clean; fi)
+CBM_BUILD_ID_VALUE ?= local.$(CBM_GIT_COMMIT_VALUE).$(CBM_GIT_DIRTY_VALUE)
+CFLAGS_BUILD_INFO = -DCBM_GIT_COMMIT=\"$(CBM_GIT_COMMIT_VALUE)\" \
+                    -DCBM_GIT_DIRTY=\"$(CBM_GIT_DIRTY_VALUE)\" \
+                    -DCBM_BUILD_ID=\"$(CBM_BUILD_ID_VALUE)\"
 # CBM_BIND_TS_ALLOCATOR=1: bind the tree-sitter runtime to mimalloc (#424). Only
 # the prod build uses mimalloc (MI_OVERRIDE=1); the test build is CRT+ASan, where
 # binding would create an alloc/free mismatch, so the guard is prod-only.
-CFLAGS_PROD = $(CFLAGS_COMMON) -O2 -DCBM_BIND_TS_ALLOCATOR=1 $(CFLAGS_EXTRA)
+CFLAGS_PROD = $(CFLAGS_COMMON) -O2 -DCBM_BIND_TS_ALLOCATOR=1 $(CFLAGS_BUILD_INFO) $(CFLAGS_EXTRA)
 CXXFLAGS_PROD = $(CXXFLAGS_COMMON) -O2
 
 # Test flags: debug + sanitizers (override SANITIZE= to disable on Windows)
@@ -124,10 +139,11 @@ EXTRACTION_SRCS = \
     $(CBM_DIR)/extract_semantic.c \
     $(CBM_DIR)/extract_type_refs.c \
     $(CBM_DIR)/extract_type_assigns.c \
-    $(CBM_DIR)/extract_env_accesses.c \
-    $(CBM_DIR)/extract_channels.c \
-    $(CBM_DIR)/extract_k8s.c \
-    $(CBM_DIR)/helpers.c \
+$(CBM_DIR)/extract_env_accesses.c \
+$(CBM_DIR)/extract_channels.c \
+$(CBM_DIR)/extract_t100_4gl.c \
+$(CBM_DIR)/extract_k8s.c \
+$(CBM_DIR)/helpers.c \
     $(CBM_DIR)/lang_specs.c \
     $(CBM_DIR)/service_patterns.c
 

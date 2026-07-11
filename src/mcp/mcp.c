@@ -1,5 +1,5 @@
 /*
- * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 14 graph tools.
+ * mcp.c — MCP server: JSON-RPC 2.0 over stdio with source-owned graph tools.
  *
  * Uses yyjson for fast JSON parsing/building.
  * Single-threaded event loop: read line → parse → dispatch → respond.
@@ -56,7 +56,9 @@ enum {
 #include "foundation/log.h"
 #include "foundation/str_util.h"
 #include "foundation/compat_regex.h"
+#include "foundation/build_info.h"
 #include "pipeline/artifact.h"
+#include "ui/embedded_assets.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -75,6 +77,7 @@ enum {
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 /* ── Constants ────────────────────────────────────────────────── */
 
@@ -287,7 +290,10 @@ static const tool_def_t TOOLS[] = {
      "same-file symbols (default true)\"}},"
      "\"required\":[\"query\",\"project\"]}"},
     {"index_repository",
-     "Index a repository into the knowledge graph. "
+     "Index a repository into the knowledge graph. Starts a cancellable background job by "
+     "default and returns job_id; poll index_status(job_id=...) for phase, current file, "
+     "done/total, heartbeat, and elapsed time. Pass background=false only for legacy blocking "
+     "behavior. "
      "Special mode 'cross-repo-intelligence': skip extraction, only match Routes/Channels "
      "across projects to create CROSS_HTTP_CALLS/CROSS_ASYNC_CALLS/CROSS_CHANNEL edges. "
      "Requires target_projects param. Ensure target projects have fresh indexes first.",
@@ -304,7 +310,9 @@ static const tool_def_t TOOLS[] = {
      "Use [\\\"*\\\"] for all indexed projects. Run list_projects to see available projects.\"},"
      "\"persistence\":{\"type\":\"boolean\",\"default\":false,\"description\":"
      "\"Write compressed artifact to .codebase-memory/graph.db.zst for team sharing. "
-     "Teammates can bootstrap from the artifact instead of full re-indexing.\"}"
+     "Teammates can bootstrap from the artifact instead of full re-indexing.\"},"
+     "\"background\":{\"type\":\"boolean\",\"default\":true,\"description\":"
+     "\"Return a job_id immediately. Use index_status to poll and cancel_index to stop.\"}"
      "},\"required\":[\"repo_path\"]}"},
 
     {"search_graph",
@@ -438,9 +446,25 @@ static const tool_def_t TOOLS[] = {
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
 
-    {"index_status", "Get the indexing status of a project",
-     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
-     "\"project\"]}"},
+    {"index_status",
+     "Get a background indexing job lifecycle by job_id, or indexed-project freshness by "
+     "project. Project status is one of ready, stale_source, stale_extractor, missing_root, or "
+     "partial and includes persisted source/extractor provenance.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"job_id\":{\"type\":\"string\",\"description\":\"Job id returned by "
+     "index_repository\"}}}"},
+
+    {"cancel_index", "Cancel a background indexing job without terminating the MCP server.",
+     "{\"type\":\"object\",\"properties\":{\"job_id\":{\"type\":\"string\"}},"
+     "\"required\":[\"job_id\"]}"},
+
+    {"prune_index",
+     "Evaluate whether an index is a safe prune candidate. P0 is dry-run only and never deletes "
+     "the database; stale_source and stale_extractor remain reindex candidates, not prune "
+     "candidates.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"dry_run\":{\"type\":\"boolean\",\"default\":true,\"description\":\"Must remain true; "
+     "P0 never deletes index files.\"}},\"required\":[\"project\"]}"},
 
     {"detect_changes",
      "Detect git-changed files and their blast radius. impacted_symbols lists the symbols "
@@ -496,6 +520,26 @@ char *cbm_mcp_tools_list(void) {
     }
 
     yyjson_mut_obj_add_val(doc, root, "tools", tools);
+
+    /* The MCP tools/list payload doubles as the source-owned capability
+     * contract. Keeping this next to TOOLS prevents binary/plugin tool lists
+     * from drifting from the schemas actually served by the executable. */
+    yyjson_mut_val *capabilities = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, capabilities, "schema_version", 1);
+    yyjson_mut_obj_add_str(doc, capabilities, "server", "codebase-memory-mcp");
+    yyjson_mut_obj_add_str(doc, capabilities, "version", CBM_VERSION);
+    yyjson_mut_obj_add_str(doc, capabilities, "git_commit", CBM_GIT_COMMIT);
+    yyjson_mut_obj_add_str(doc, capabilities, "dirty", CBM_GIT_DIRTY);
+    yyjson_mut_obj_add_str(doc, capabilities, "build_id", CBM_BUILD_ID);
+    yyjson_mut_obj_add_bool(doc, capabilities, "ui_assets", CBM_EMBEDDED_FILE_COUNT > 0);
+    yyjson_mut_obj_add_int(doc, capabilities, "tool_count", TOOL_COUNT);
+
+    yyjson_mut_val *tool_names = yyjson_mut_arr(doc);
+    for (int i = 0; i < TOOL_COUNT; i++) {
+        yyjson_mut_arr_add_str(doc, tool_names, TOOLS[i].name);
+    }
+    yyjson_mut_obj_add_val(doc, capabilities, "tools", tool_names);
+    yyjson_mut_obj_add_val(doc, root, "capabilities", capabilities);
 
     char *out = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
@@ -634,9 +678,43 @@ bool cbm_mcp_get_bool_arg(const char *args_json, const char *key) {
     return result;
 }
 
+static bool get_bool_arg_default(const char *args_json, const char *key, bool default_val) {
+    yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
+    if (!doc) {
+        return default_val;
+    }
+    yyjson_val *val = yyjson_obj_get(yyjson_doc_get_root(doc), key);
+    bool result = (val && yyjson_is_bool(val)) ? yyjson_get_bool(val) : default_val;
+    yyjson_doc_free(doc);
+    return result;
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  MCP SERVER
  * ══════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    INDEX_JOB_NONE = 0,
+    INDEX_JOB_QUEUED,
+    INDEX_JOB_RUNNING,
+    INDEX_JOB_CANCELLING,
+    INDEX_JOB_CANCELLED,
+    INDEX_JOB_COMPLETED,
+    INDEX_JOB_ERROR,
+} cbm_index_job_state_t;
+
+typedef struct {
+    char id[64];
+    char *repo_path;
+    char *project_name;
+    bool persistence;
+    int64_t request_id;
+    cbm_pipeline_t *pipeline;
+    int rc;
+    cbm_index_job_state_t state;
+} cbm_index_job_t;
+
+static atomic_ullong g_index_job_counter = 1;
 
 struct cbm_mcp_server {
     cbm_store_t *store;             /* currently open project store (or NULL) */
@@ -657,9 +735,13 @@ struct cbm_mcp_server {
     cbm_thread_t autoindex_tid;
     bool autoindex_active; /* true if auto-index thread was started */
 
-    /* Active pipeline tracking for cancellation support */
-    cbm_pipeline_t *active_pipeline; /* non-NULL while index_repository runs */
-    int64_t active_request_id;       /* JSON-RPC id of the in-progress tool call */
+    /* Active pipeline + background job tracking for cancellation support. */
+    _Atomic(cbm_pipeline_t *) active_pipeline;
+    atomic_llong active_request_id;
+    cbm_mutex_t job_mutex;
+    cbm_thread_t job_tid;
+    bool job_thread_active;
+    cbm_index_job_t job;
 };
 
 cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
@@ -677,6 +759,9 @@ cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
         srv->store = cbm_store_open_memory();
     }
     srv->owns_store = true;
+    atomic_init(&srv->active_pipeline, NULL);
+    atomic_init(&srv->active_request_id, 0);
+    cbm_mutex_init(&srv->job_mutex);
 
     return srv;
 }
@@ -715,10 +800,21 @@ void cbm_mcp_server_free(cbm_mcp_server_t *srv) {
     if (srv->autoindex_active) {
         cbm_thread_join(&srv->autoindex_tid);
     }
+    cbm_pipeline_t *active = atomic_load(&srv->active_pipeline);
+    if (active) {
+        cbm_pipeline_cancel(active);
+    }
+    if (srv->job_thread_active) {
+        cbm_thread_join(&srv->job_tid);
+    }
+    cbm_pipeline_free(srv->job.pipeline);
+    free(srv->job.repo_path);
+    free(srv->job.project_name);
     if (srv->owns_store && srv->store) {
         cbm_store_close(srv->store);
     }
     free(srv->current_project);
+    cbm_mutex_destroy(&srv->job_mutex);
     free(srv);
 }
 
@@ -753,7 +849,7 @@ bool cbm_mcp_server_has_cached_store(cbm_mcp_server_t *srv) {
 }
 
 cbm_pipeline_t *cbm_mcp_server_active_pipeline(cbm_mcp_server_t *srv) {
-    return srv ? srv->active_pipeline : NULL;
+    return srv ? atomic_load(&srv->active_pipeline) : NULL;
 }
 
 /* ── Cache dir + project DB path helpers ───────────────────────── */
@@ -809,20 +905,14 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     project_db_path(project, path, sizeof(path));
     srv->store = cbm_store_open_path_query(path);
     if (srv->store) {
-        /* Check DB integrity — auto-clean corrupt databases */
+        /* Check DB integrity without deleting evidence. P0 prune/delete is
+         * explicit-only: query/status paths may report a corrupt index, but
+         * must never unlink its DB, WAL, or SHM files. */
         if (!cbm_store_check_integrity(srv->store)) {
-            cbm_log_error("store.auto_clean", "project", project, "path", path, "action",
-                          "deleting corrupt db — re-index required");
+            cbm_log_error("store.integrity", "project", project, "path", path, "action",
+                          "preserving corrupt db — explicit delete_project or re-index required");
             cbm_store_close(srv->store);
             srv->store = NULL;
-            /* Delete the corrupt DB + WAL/SHM files */
-            cbm_unlink(path);
-            char wal_path[MCP_FIELD_SIZE];
-            char shm_path[MCP_FIELD_SIZE];
-            snprintf(wal_path, sizeof(wal_path), "%s-wal", path);
-            snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
-            cbm_unlink(wal_path);
-            cbm_unlink(shm_path);
             return NULL;
         }
 
@@ -850,6 +940,11 @@ static bool is_project_db_file(const char *name, size_t len);
 
 /* Forward decl — definition lives below in handle_trace_call_path's helpers. */
 static void free_node_contents(cbm_node_t *n);
+
+/* Forward decl — background index job response builder lives beside the
+ * index_repository implementation. */
+static bool index_job_is_active(cbm_index_job_state_t state);
+static char *build_index_job_result(cbm_mcp_server_t *srv, const char *job_id, bool is_error);
 
 /* Scan cache dir for .db files, writing comma-separated quoted names into out.
  * Returns the number of projects found. */
@@ -1741,46 +1836,249 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     return res;
 }
 
+typedef struct {
+    cbm_project_t project;
+    cbm_index_metadata_t metadata;
+    cbm_freshness_state_t state;
+    bool root_exists;
+    bool metadata_present;
+    int nodes;
+    int edges;
+    int recorded_file_hashes;
+    int current_file_count;
+    char current_source_fingerprint[96];
+} mcp_freshness_snapshot_t;
+
+static void freshness_snapshot_free(mcp_freshness_snapshot_t *snapshot) {
+    if (!snapshot) {
+        return;
+    }
+    cbm_project_free_fields(&snapshot->project);
+    cbm_index_metadata_free_fields(&snapshot->metadata);
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static int freshness_snapshot_load(cbm_store_t *store, const char *project,
+                                   mcp_freshness_snapshot_t *snapshot) {
+    if (!store || !project || !snapshot) {
+        return CBM_NOT_FOUND;
+    }
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->nodes = cbm_store_count_nodes(store, project);
+    snapshot->edges = cbm_store_count_edges(store, project);
+    if (cbm_store_get_project(store, project, &snapshot->project) != CBM_STORE_OK) {
+        return CBM_NOT_FOUND;
+    }
+
+    struct stat root_st;
+    snapshot->root_exists = snapshot->project.root_path &&
+                            stat(snapshot->project.root_path, &root_st) == 0 &&
+                            S_ISDIR(root_st.st_mode);
+    snapshot->metadata_present =
+        cbm_store_get_index_metadata(store, project, &snapshot->metadata) == CBM_STORE_OK;
+
+    cbm_file_hash_t *hashes = NULL;
+    if (cbm_store_get_file_hashes(store, project, &hashes,
+                                  &snapshot->recorded_file_hashes) == CBM_STORE_OK) {
+        cbm_store_free_file_hashes(hashes, snapshot->recorded_file_hashes);
+    } else {
+        snapshot->recorded_file_hashes = 0;
+    }
+
+    if (snapshot->root_exists && snapshot->metadata_present && snapshot->metadata.mode >= 0 &&
+        snapshot->metadata.mode <= (int)CBM_MODE_FAST) {
+        (void)cbm_pipeline_compute_source_fingerprint(
+            snapshot->project.root_path, (cbm_index_mode_t)snapshot->metadata.mode,
+            snapshot->current_source_fingerprint,
+            sizeof(snapshot->current_source_fingerprint), &snapshot->current_file_count);
+    }
+
+    cbm_freshness_input_t input = {
+        .root_exists = snapshot->root_exists,
+        .metadata_present = snapshot->metadata_present,
+        .complete = snapshot->metadata_present && snapshot->metadata.complete,
+        .node_count = snapshot->nodes,
+        .indexed_file_count = snapshot->metadata_present ? snapshot->metadata.file_count : -1,
+        .stored_file_count = snapshot->recorded_file_hashes,
+        .stored_source_fingerprint = snapshot->metadata.source_fingerprint,
+        .current_source_fingerprint = snapshot->current_source_fingerprint,
+        .stored_extractor_id = snapshot->metadata.extractor_id,
+        .current_extractor_id = cbm_pipeline_extractor_id(),
+    };
+    snapshot->state = cbm_pipeline_classify_freshness(&input);
+    return 0;
+}
+
+static void freshness_snapshot_add_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                        const char *project,
+                                        const mcp_freshness_snapshot_t *snapshot) {
+    yyjson_mut_obj_add_strcpy(doc, root, "project", project);
+    yyjson_mut_obj_add_str(doc, root, "status", cbm_freshness_state_name(snapshot->state));
+    yyjson_mut_obj_add_int(doc, root, "freshness_contract_version", 1);
+    yyjson_mut_obj_add_int(doc, root, "nodes", snapshot->nodes);
+    yyjson_mut_obj_add_int(doc, root, "edges", snapshot->edges);
+    yyjson_mut_obj_add_strcpy(doc, root, "root_path",
+                              snapshot->project.root_path ? snapshot->project.root_path : "");
+    yyjson_mut_obj_add_bool(doc, root, "root_exists", snapshot->root_exists);
+    yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
+                              snapshot->project.indexed_at ? snapshot->project.indexed_at : "");
+    yyjson_mut_obj_add_bool(doc, root, "metadata_present", snapshot->metadata_present);
+    yyjson_mut_obj_add_bool(doc, root, "complete",
+                           snapshot->metadata_present && snapshot->metadata.complete);
+    yyjson_mut_obj_add_int(doc, root, "index_mode",
+                           snapshot->metadata_present ? snapshot->metadata.mode : -1);
+    yyjson_mut_obj_add_int(doc, root, "indexed_file_count",
+                           snapshot->metadata_present ? snapshot->metadata.file_count : -1);
+    yyjson_mut_obj_add_int(doc, root, "recorded_file_hashes", snapshot->recorded_file_hashes);
+    yyjson_mut_obj_add_int(doc, root, "current_file_count", snapshot->current_file_count);
+    yyjson_mut_obj_add_strcpy(
+        doc, root, "stored_source_fingerprint",
+        snapshot->metadata.source_fingerprint ? snapshot->metadata.source_fingerprint : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "current_source_fingerprint",
+                              snapshot->current_source_fingerprint);
+    yyjson_mut_obj_add_strcpy(
+        doc, root, "stored_extractor_id",
+        snapshot->metadata.extractor_id ? snapshot->metadata.extractor_id : "");
+    yyjson_mut_obj_add_str(doc, root, "current_extractor_id", cbm_pipeline_extractor_id());
+}
+
+static const char *freshness_hint(cbm_freshness_state_t state) {
+    switch (state) {
+    case CBM_FRESHNESS_STALE_SOURCE:
+        return "Source files changed after indexing; run index_repository to refresh.";
+    case CBM_FRESHNESS_STALE_EXTRACTOR:
+        return "The executable/extractor build changed; run index_repository for a full rebuild.";
+    case CBM_FRESHNESS_MISSING_ROOT:
+        return "The indexed root no longer exists. Review with prune_index(dry_run=true); no "
+               "automatic deletion occurs.";
+    case CBM_FRESHNESS_PARTIAL:
+        return "Index provenance is missing or incomplete. Re-index before trusting graph "
+               "freshness; prune_index remains dry-run only.";
+    case CBM_FRESHNESS_READY:
+    default:
+        return NULL;
+    }
+}
+
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
+    char *job_id = cbm_mcp_get_string_arg(args, "job_id");
+    if (job_id) {
+        char *result = build_index_job_result(srv, job_id, false);
+        free(job_id);
+        return result;
+    }
+
     char *project = cbm_mcp_get_string_arg(args, "project");
+    if (!project) {
+        return cbm_mcp_text_result("project or job_id is required", true);
+    }
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
+
+    mcp_freshness_snapshot_t snapshot;
+    if (freshness_snapshot_load(store, project, &snapshot) != 0) {
+        free(project);
+        return cbm_mcp_text_result("unable to read index freshness metadata", true);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
-    if (project) {
-        int nodes = cbm_store_count_nodes(store, project);
-        int edges = cbm_store_count_edges(store, project);
-        yyjson_mut_obj_add_str(doc, root, "project", project);
-        yyjson_mut_obj_add_int(doc, root, "nodes", nodes);
-        yyjson_mut_obj_add_int(doc, root, "edges", edges);
-        yyjson_mut_obj_add_str(doc, root, "status", nodes > 0 ? "ready" : "empty");
-        cbm_project_t proj_info = {0};
-        if (cbm_store_get_project(store, project, &proj_info) == CBM_STORE_OK) {
-            yyjson_mut_obj_add_strcpy(doc, root, "root_path",
-                                      proj_info.root_path ? proj_info.root_path : "");
-            add_git_context_json(doc, root, proj_info.root_path);
-            safe_str_free(&proj_info.name);
-            safe_str_free(&proj_info.indexed_at);
-            safe_str_free(&proj_info.root_path);
-        }
-        if (nodes == 0) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "Project is empty. Re-run index_repository(repo_path=...) to populate.");
-        }
-    } else {
-        yyjson_mut_obj_add_str(doc, root, "status", "no_project");
+    freshness_snapshot_add_json(doc, root, project, &snapshot);
+    add_git_context_json(doc, root, snapshot.project.root_path);
+    const char *hint = freshness_hint(snapshot.state);
+    if (hint) {
+        yyjson_mut_obj_add_str(doc, root, "hint", hint);
     }
 
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
+    freshness_snapshot_free(&snapshot);
     free(project);
 
     char *result = cbm_mcp_text_result(json, false);
     free(json);
+    return result;
+}
+
+static char *handle_prune_index(cbm_mcp_server_t *srv, const char *args) {
+    char *project = cbm_mcp_get_string_arg(args, "project");
+    if (!project) {
+        return cbm_mcp_text_result("project is required", true);
+    }
+    if (!get_bool_arg_default(args, "dry_run", true)) {
+        free(project);
+        return cbm_mcp_text_result(
+            "P0 prune_index is dry-run only; dry_run=false was rejected and no files were "
+            "deleted.",
+            true);
+    }
+
+    cbm_store_t *store = resolve_store(srv, project);
+    REQUIRE_STORE(store, project);
+    mcp_freshness_snapshot_t snapshot;
+    if (freshness_snapshot_load(store, project, &snapshot) != 0) {
+        free(project);
+        return cbm_mcp_text_result("unable to evaluate prune candidate", true);
+    }
+
+    char db_path[CBM_SZ_1K];
+    project_db_path(project, db_path, sizeof(db_path));
+    struct stat db_st;
+    int64_t size_bytes = stat(db_path, &db_st) == 0 ? (int64_t)db_st.st_size : 0;
+    bool candidate = snapshot.state == CBM_FRESHNESS_MISSING_ROOT ||
+                     snapshot.state == CBM_FRESHNESS_PARTIAL;
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    freshness_snapshot_add_json(doc, root, project, &snapshot);
+    yyjson_mut_obj_add_bool(doc, root, "dry_run", true);
+    yyjson_mut_obj_add_bool(doc, root, "candidate", candidate);
+    yyjson_mut_obj_add_bool(doc, root, "deleted", false);
+    yyjson_mut_obj_add_str(doc, root, "action", candidate ? "would_prune" : "keep");
+    yyjson_mut_obj_add_strcpy(doc, root, "db_path", db_path);
+    yyjson_mut_obj_add_int(doc, root, "size_bytes", size_bytes);
+    yyjson_mut_obj_add_str(
+        doc, root, "reason",
+        candidate ? "missing_root or partial indexes require explicit human review"
+                  : "ready/stale_source/stale_extractor indexes should be kept and reindexed as "
+                    "needed");
+
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    freshness_snapshot_free(&snapshot);
+    free(project);
+    char *result = cbm_mcp_text_result(json, false);
+    free(json);
+    return result;
+}
+
+static char *handle_cancel_index(cbm_mcp_server_t *srv, const char *args) {
+    char *job_id = cbm_mcp_get_string_arg(args, "job_id");
+    if (!job_id) {
+        return cbm_mcp_text_result("job_id is required", true);
+    }
+
+    cbm_mutex_lock(&srv->job_mutex);
+    bool matches = srv->job.id[0] && strcmp(job_id, srv->job.id) == 0;
+    bool active = matches && index_job_is_active(srv->job.state);
+    cbm_pipeline_t *pipeline = active ? srv->job.pipeline : NULL;
+    if (active) {
+        srv->job.state = INDEX_JOB_CANCELLING;
+    }
+    cbm_mutex_unlock(&srv->job_mutex);
+
+    if (!matches) {
+        free(job_id);
+        return cbm_mcp_text_result("job_id not found", true);
+    }
+    if (pipeline) {
+        cbm_pipeline_cancel(pipeline);
+    }
+    char *result = build_index_job_result(srv, job_id, false);
+    free(job_id);
     return result;
 }
 
@@ -2704,6 +3002,178 @@ static void build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     }
 }
 
+static const char *index_job_state_name(cbm_index_job_state_t state) {
+    switch (state) {
+    case INDEX_JOB_QUEUED:
+        return "queued";
+    case INDEX_JOB_RUNNING:
+        return "running";
+    case INDEX_JOB_CANCELLING:
+        return "cancelling";
+    case INDEX_JOB_CANCELLED:
+        return "cancelled";
+    case INDEX_JOB_COMPLETED:
+        return "completed";
+    case INDEX_JOB_ERROR:
+        return "error";
+    default:
+        return "none";
+    }
+}
+
+static bool index_job_is_active(cbm_index_job_state_t state) {
+    return state == INDEX_JOB_QUEUED || state == INDEX_JOB_RUNNING ||
+           state == INDEX_JOB_CANCELLING;
+}
+
+static void invalidate_server_store(cbm_mcp_server_t *srv) {
+    if (srv->owns_store && srv->store) {
+        cbm_store_close(srv->store);
+        srv->store = NULL;
+    }
+    free(srv->current_project);
+    srv->current_project = NULL;
+}
+
+static bool reap_finished_index_job(cbm_mcp_server_t *srv) {
+    cbm_mutex_lock(&srv->job_mutex);
+    bool active = index_job_is_active(srv->job.state);
+    cbm_mutex_unlock(&srv->job_mutex);
+    if (active) {
+        return false;
+    }
+    if (srv->job_thread_active) {
+        cbm_thread_join(&srv->job_tid);
+        srv->job_thread_active = false;
+    }
+    cbm_pipeline_free(srv->job.pipeline);
+    free(srv->job.repo_path);
+    free(srv->job.project_name);
+    memset(&srv->job, 0, sizeof(srv->job));
+    return true;
+}
+
+static bool pipeline_cancelled(cbm_pipeline_t *pipeline) {
+    cbm_pipeline_progress_t progress = {0};
+    return cbm_pipeline_get_progress(pipeline, &progress) == 0 && progress.cancelled;
+}
+
+static void *index_job_thread(void *arg) {
+    cbm_mcp_server_t *srv = arg;
+    cbm_pipeline_t *pipeline = srv->job.pipeline;
+    int rc = CBM_NOT_FOUND;
+    bool locked = false;
+
+    while (!pipeline_cancelled(pipeline)) {
+        if (cbm_pipeline_try_lock()) {
+            locked = true;
+            break;
+        }
+        cbm_usleep(MCP_HALF_SEC_US / MCP_COL_10);
+    }
+
+    if (locked) {
+        cbm_mutex_lock(&srv->job_mutex);
+        if (srv->job.state == INDEX_JOB_QUEUED) {
+            srv->job.state = INDEX_JOB_RUNNING;
+        }
+        cbm_mutex_unlock(&srv->job_mutex);
+        rc = cbm_pipeline_run(pipeline);
+        cbm_pipeline_unlock();
+    }
+
+    bool cancelled = pipeline_cancelled(pipeline);
+    atomic_store(&srv->active_pipeline, NULL);
+    cbm_mutex_lock(&srv->job_mutex);
+    srv->job.rc = rc;
+    srv->job.state = cancelled ? INDEX_JOB_CANCELLED
+                               : (rc == 0 ? INDEX_JOB_COMPLETED : INDEX_JOB_ERROR);
+    cbm_mutex_unlock(&srv->job_mutex);
+    cbm_mem_collect();
+    return NULL;
+}
+
+static char *build_index_job_result(cbm_mcp_server_t *srv, const char *job_id, bool is_error) {
+    cbm_mutex_lock(&srv->job_mutex);
+    bool matches = job_id && srv->job.id[0] && strcmp(job_id, srv->job.id) == 0;
+    cbm_index_job_state_t state = srv->job.state;
+    cbm_pipeline_t *pipeline = matches ? srv->job.pipeline : NULL;
+    char id[64];
+    char project[CBM_SZ_256];
+    snprintf(id, sizeof(id), "%s", matches ? srv->job.id : "");
+    snprintf(project, sizeof(project), "%s",
+             matches && srv->job.project_name ? srv->job.project_name : "");
+    int rc = srv->job.rc;
+    cbm_mutex_unlock(&srv->job_mutex);
+
+    if (!matches) {
+        return cbm_mcp_text_result("job_id not found", true);
+    }
+
+    cbm_pipeline_progress_t progress = {0};
+    (void)cbm_pipeline_get_progress(pipeline, &progress);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "job_id", id);
+    yyjson_mut_obj_add_str(doc, root, "project", project);
+    yyjson_mut_obj_add_str(doc, root, "status", index_job_state_name(state));
+    yyjson_mut_obj_add_str(doc, root, "phase", progress.phase);
+    yyjson_mut_obj_add_str(doc, root, "current_file", progress.current_file);
+    yyjson_mut_obj_add_int(doc, root, "done", progress.done);
+    yyjson_mut_obj_add_int(doc, root, "total", progress.total);
+    yyjson_mut_obj_add_sint(doc, root, "heartbeat_age_ms", progress.heartbeat_age_ms);
+    yyjson_mut_obj_add_sint(doc, root, "elapsed_ms", progress.elapsed_ms);
+    if (!index_job_is_active(state)) {
+        yyjson_mut_obj_add_int(doc, root, "result_code", rc);
+    }
+    if (index_job_is_active(state)) {
+        yyjson_mut_obj_add_str(doc, root, "next",
+                               "Poll index_status with this job_id; use cancel_index to stop.");
+    }
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    char *result = cbm_mcp_text_result(json, is_error);
+    free(json);
+    return result;
+}
+
+static char *start_background_index_job(cbm_mcp_server_t *srv, cbm_pipeline_t *pipeline,
+                                        char *repo_path, char *project_name, bool persistence) {
+    if (!reap_finished_index_job(srv)) {
+        cbm_pipeline_free(pipeline);
+        free(repo_path);
+        free(project_name);
+        return cbm_mcp_text_result(
+            "another indexing job is active; poll index_status or cancel_index first", true);
+    }
+
+    unsigned long long seq = atomic_fetch_add(&g_index_job_counter, 1);
+    cbm_mutex_lock(&srv->job_mutex);
+    snprintf(srv->job.id, sizeof(srv->job.id), "index-%lld-%llu", (long long)time(NULL), seq);
+    srv->job.repo_path = repo_path;
+    srv->job.project_name = project_name;
+    srv->job.persistence = persistence;
+    srv->job.request_id = atomic_load(&srv->active_request_id);
+    srv->job.pipeline = pipeline;
+    srv->job.rc = CBM_NOT_FOUND;
+    srv->job.state = INDEX_JOB_QUEUED;
+    char job_id[64];
+    snprintf(job_id, sizeof(job_id), "%s", srv->job.id);
+    cbm_mutex_unlock(&srv->job_mutex);
+
+    atomic_store(&srv->active_pipeline, pipeline);
+    if (cbm_thread_create(&srv->job_tid, 0, index_job_thread, srv) != 0) {
+        atomic_store(&srv->active_pipeline, NULL);
+        cbm_mutex_lock(&srv->job_mutex);
+        srv->job.state = INDEX_JOB_ERROR;
+        cbm_mutex_unlock(&srv->job_mutex);
+        return build_index_job_result(srv, job_id, true);
+    }
+    srv->job_thread_active = true;
+    return build_index_job_result(srv, job_id, false);
+}
+
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
     char *mode_str = cbm_mcp_get_string_arg(args, "mode");
@@ -2730,6 +3200,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     free(mode_str);
 
     bool persistence = cbm_mcp_get_bool_arg(args, "persistence");
+    bool background = get_bool_arg_default(args, "background", true);
 
     cbm_pipeline_t *p = cbm_pipeline_new(repo_path, NULL, mode);
     if (!p) {
@@ -2743,21 +3214,20 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     /* Bootstrap from artifact if no local DB exists */
     try_artifact_bootstrap(project_name, repo_path);
 
-    /* Close cached store — pipeline will delete + recreate the .db file */
-    if (srv->owns_store && srv->store) {
-        cbm_store_close(srv->store);
-        srv->store = NULL;
+    /* Close cached store — pipeline will delete + recreate the .db file. */
+    invalidate_server_store(srv);
+
+    if (background) {
+        return start_background_index_job(srv, p, repo_path, project_name, persistence);
     }
-    free(srv->current_project);
-    srv->current_project = NULL;
 
     /* Serialize pipeline runs to prevent concurrent writes.
      * Track active pipeline so signal handler and notifications/cancelled
-     * can cancel it mid-run. */
+    * can cancel it mid-run. */
     cbm_pipeline_lock();
-    srv->active_pipeline = p;
+    atomic_store(&srv->active_pipeline, p);
     int rc = cbm_pipeline_run(p);
-    srv->active_pipeline = NULL;
+    atomic_store(&srv->active_pipeline, NULL);
     cbm_pipeline_unlock();
 
     /* Capture the excluded-subtree list (#411) while the pipeline (which owns
@@ -2770,21 +3240,18 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     cbm_mem_collect(); /* return mimalloc pages to OS after large indexing */
 
     /* Invalidate cached store so next query reopens the fresh database */
-    if (srv->owns_store && srv->store) {
-        cbm_store_close(srv->store);
-        srv->store = NULL;
-    }
-    free(srv->current_project);
-    srv->current_project = NULL;
+    invalidate_server_store(srv);
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
     yyjson_mut_obj_add_str(doc, root, "project", project_name);
-    yyjson_mut_obj_add_str(doc, root, "status", rc == 0 ? "indexed" : "error");
+    bool cancelled = pipeline_cancelled(p);
+    yyjson_mut_obj_add_str(doc, root, "status",
+                           cancelled ? "cancelled" : (rc == 0 ? "indexed" : "error"));
 
-    if (rc != 0) {
+    if (rc != 0 && !cancelled) {
         yyjson_mut_obj_add_str(doc, root, "hint",
                                "Pipeline failed. Check repo_path exists and contains source files. "
                                "Try mode='fast' for a quicker diagnostic run.");
@@ -2802,7 +3269,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     free(project_name);
     free(repo_path);
 
-    char *result = cbm_mcp_text_result(json, rc != 0);
+    char *result = cbm_mcp_text_result(json, rc != 0 && !cancelled);
     free(json);
     return result;
 }
@@ -4956,6 +5423,12 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     if (strcmp(tool_name, "index_status") == 0) {
         return handle_index_status(srv, args_json);
     }
+    if (strcmp(tool_name, "cancel_index") == 0) {
+        return handle_cancel_index(srv, args_json);
+    }
+    if (strcmp(tool_name, "prune_index") == 0) {
+        return handle_prune_index(srv, args_json);
+    }
     if (strcmp(tool_name, "delete_project") == 0) {
         return handle_delete_project(srv, args_json);
     }
@@ -5247,11 +5720,25 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     /* Notifications (no id) → handle cancellation, then no response */
     if (!req.has_id) {
         if (req.method && strcmp(req.method, "notifications/cancelled") == 0) {
-            /* MCP cancellation: cancel the active pipeline if request ID matches */
-            if (srv->active_pipeline) {
-                cbm_pipeline_cancel(srv->active_pipeline);
+            int64_t cancelled_id = req.params_raw
+                                       ? cbm_mcp_get_int_arg(req.params_raw, "requestId",
+                                                             CBM_NOT_FOUND)
+                                       : CBM_NOT_FOUND;
+            int64_t active_id = atomic_load(&srv->active_request_id);
+            cbm_mutex_lock(&srv->job_mutex);
+            bool job_matches = index_job_is_active(srv->job.state) &&
+                               (cancelled_id == CBM_NOT_FOUND ||
+                                cancelled_id == srv->job.request_id);
+            if (job_matches) {
+                srv->job.state = INDEX_JOB_CANCELLING;
+            }
+            cbm_mutex_unlock(&srv->job_mutex);
+            cbm_pipeline_t *pipeline = atomic_load(&srv->active_pipeline);
+            if (pipeline && (job_matches || cancelled_id == CBM_NOT_FOUND ||
+                             cancelled_id == active_id)) {
+                cbm_pipeline_cancel(pipeline);
                 cbm_log_info("mcp.cancelled", "request_id_active",
-                             srv->active_request_id > 0 ? "yes" : "none");
+                             active_id > 0 || job_matches ? "yes" : "none");
             }
         }
         cbm_jsonrpc_request_free(&req);
@@ -5276,7 +5763,9 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
 
         struct timespec t0;
         cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
+        atomic_store(&srv->active_request_id, req.id);
         result_json = cbm_mcp_handle_tool(srv, tool_name, tool_args);
+        atomic_store(&srv->active_request_id, 0);
         struct timespec t1;
         cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
         long long dur_us = ((long long)(t1.tv_sec - t0.tv_sec) * MCP_S_TO_US) +

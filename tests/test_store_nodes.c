@@ -96,6 +96,37 @@ TEST(store_project_update) {
     PASS();
 }
 
+TEST(store_index_metadata_roundtrip) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "freshness", "/tmp/freshness"), CBM_STORE_OK);
+
+    cbm_index_metadata_t input = {
+        .project = "freshness",
+        .source_fingerprint = "stat-v1:abc123:3",
+        .extractor_id = "build-test-1",
+        .file_count = 3,
+        .mode = 2,
+        .complete = true,
+    };
+    ASSERT_EQ(cbm_store_upsert_index_metadata(s, &input), CBM_STORE_OK);
+
+    cbm_index_metadata_t actual = {0};
+    ASSERT_EQ(cbm_store_get_index_metadata(s, "freshness", &actual), CBM_STORE_OK);
+    ASSERT_STR_EQ(actual.project, input.project);
+    ASSERT_STR_EQ(actual.source_fingerprint, input.source_fingerprint);
+    ASSERT_STR_EQ(actual.extractor_id, input.extractor_id);
+    ASSERT_EQ(actual.file_count, input.file_count);
+    ASSERT_EQ(actual.mode, input.mode);
+    ASSERT_TRUE(actual.complete);
+    cbm_index_metadata_free_fields(&actual);
+
+    cbm_index_metadata_t missing = {0};
+    ASSERT_EQ(cbm_store_get_index_metadata(s, "missing", &missing), CBM_STORE_NOT_FOUND);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(store_project_delete) {
     cbm_store_t *s = cbm_store_open_memory();
     cbm_store_upsert_project(s, "test", "/tmp/test");
@@ -1549,6 +1580,7 @@ SUITE(store_nodes) {
     RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);
     RUN_TEST(store_project_update);
+    RUN_TEST(store_index_metadata_roundtrip);
     RUN_TEST(store_project_delete);
     RUN_TEST(store_node_crud);
     RUN_TEST(store_node_dedup);

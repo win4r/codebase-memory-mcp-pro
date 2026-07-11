@@ -141,6 +141,100 @@ TEST(pipeline_run_null) {
     PASS();
 }
 
+TEST(pipeline_progress_snapshot_initial_state) {
+    cbm_pipeline_t *p = cbm_pipeline_new("/some/path", NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+
+    cbm_pipeline_progress_t progress = {0};
+    ASSERT_EQ(cbm_pipeline_get_progress(p, &progress), 0);
+    ASSERT_STR_EQ(progress.phase, "queued");
+    ASSERT_STR_EQ(progress.current_file, "");
+    ASSERT_EQ(progress.done, 0);
+    ASSERT_EQ(progress.total, 0);
+    ASSERT_FALSE(progress.cancelled);
+    ASSERT_TRUE(progress.elapsed_ms >= 0);
+    ASSERT_TRUE(progress.heartbeat_age_ms >= 0);
+
+    cbm_pipeline_free(p);
+    PASS();
+}
+
+TEST(pipeline_progress_reports_cancelled_run) {
+    cbm_pipeline_t *p = cbm_pipeline_new("/tmp/nonexistent-cbm-progress", NULL, CBM_MODE_FAST);
+    ASSERT_NOT_NULL(p);
+
+    cbm_pipeline_cancel(p);
+    ASSERT_EQ(cbm_pipeline_run(p), -1);
+
+    cbm_pipeline_progress_t progress = {0};
+    ASSERT_EQ(cbm_pipeline_get_progress(p, &progress), 0);
+    ASSERT_STR_EQ(progress.phase, "cancelled");
+    ASSERT_TRUE(progress.cancelled);
+    ASSERT_TRUE(progress.elapsed_ms >= 0);
+    ASSERT_TRUE(progress.heartbeat_age_ms >= 0);
+
+    cbm_pipeline_free(p);
+    PASS();
+}
+
+TEST(pipeline_freshness_classifies_all_contract_states) {
+    cbm_freshness_input_t in = {
+        .root_exists = true,
+        .metadata_present = true,
+        .complete = true,
+        .node_count = 10,
+        .indexed_file_count = 2,
+        .stored_file_count = 2,
+        .stored_source_fingerprint = "stat-v1:a:2",
+        .current_source_fingerprint = "stat-v1:a:2",
+        .stored_extractor_id = "build-a",
+        .current_extractor_id = "build-a",
+    };
+    ASSERT_STR_EQ(cbm_freshness_state_name(cbm_pipeline_classify_freshness(&in)), "ready");
+
+    in.current_source_fingerprint = "stat-v1:b:2";
+    ASSERT_STR_EQ(cbm_freshness_state_name(cbm_pipeline_classify_freshness(&in)),
+                  "stale_source");
+    in.current_source_fingerprint = in.stored_source_fingerprint;
+    in.current_extractor_id = "build-b";
+    ASSERT_STR_EQ(cbm_freshness_state_name(cbm_pipeline_classify_freshness(&in)),
+                  "stale_extractor");
+    in.current_extractor_id = in.stored_extractor_id;
+    in.root_exists = false;
+    ASSERT_STR_EQ(cbm_freshness_state_name(cbm_pipeline_classify_freshness(&in)),
+                  "missing_root");
+    in.root_exists = true;
+    in.complete = false;
+    ASSERT_STR_EQ(cbm_freshness_state_name(cbm_pipeline_classify_freshness(&in)), "partial");
+    PASS();
+}
+
+TEST(pipeline_source_fingerprint_changes_with_source) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm-fingerprint-XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+    ASSERT_EQ(th_write_file(TH_PATH(tmpdir, "main.c"), "int main(void) { return 0; }\n"), 0);
+
+    char before[96];
+    char after[96];
+    int before_count = 0;
+    int after_count = 0;
+    ASSERT_EQ(cbm_pipeline_compute_source_fingerprint(tmpdir, CBM_MODE_FAST, before,
+                                                      sizeof(before), &before_count),
+              0);
+    ASSERT_EQ(before_count, 1);
+    ASSERT_EQ(th_write_file(TH_PATH(tmpdir, "main.c"),
+                            "int main(void) { return 42; }\n"),
+              0);
+    ASSERT_EQ(cbm_pipeline_compute_source_fingerprint(tmpdir, CBM_MODE_FAST, after,
+                                                      sizeof(after), &after_count),
+              0);
+    ASSERT_EQ(after_count, 1);
+    ASSERT_TRUE(strcmp(before, after) != 0);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 /* ── Focused: file-backed store persistence ─────────────────────── */
 
 TEST(store_file_persistence) {
@@ -5986,6 +6080,10 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_cancel);
     RUN_TEST(pipeline_cancel_null);
     RUN_TEST(pipeline_run_null);
+    RUN_TEST(pipeline_progress_snapshot_initial_state);
+    RUN_TEST(pipeline_progress_reports_cancelled_run);
+    RUN_TEST(pipeline_freshness_classifies_all_contract_states);
+    RUN_TEST(pipeline_source_fingerprint_changes_with_source);
     /* File persistence */
     RUN_TEST(store_file_persistence);
     RUN_TEST(store_bulk_persistence);

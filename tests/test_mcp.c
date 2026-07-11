@@ -6,7 +6,9 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "test_framework.h"
+#include "test_helpers.h"
 #include <mcp/mcp.h>
+#include <pipeline/pipeline.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
 #include <string.h>
@@ -183,6 +185,23 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
     ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
+    free(json);
+    PASS();
+}
+
+TEST(mcp_tools_list_exposes_a_machine_readable_capability_contract) {
+    char *json = cbm_mcp_tools_list();
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "\"capabilities\""));
+    ASSERT_NOT_NULL(strstr(json, "\"schema_version\":1"));
+    ASSERT_NOT_NULL(strstr(json, "\"tool_count\":17"));
+    ASSERT_NOT_NULL(strstr(json, "\"ui_assets\":false"));
+    ASSERT_NOT_NULL(strstr(json, "\"explore\""));
+    ASSERT_NOT_NULL(strstr(json, "\"cancel_index\""));
+    ASSERT_NOT_NULL(strstr(json, "\"prune_index\""));
+    ASSERT_NOT_NULL(strstr(json, "\"background\""));
+    ASSERT_NOT_NULL(strstr(json, "\"job_id\""));
+    ASSERT_NULL(strstr(json, "\"repo_map\""));
     free(json);
     PASS();
 }
@@ -799,6 +818,80 @@ TEST(tool_index_repository_missing_path) {
     PASS();
 }
 
+TEST(tool_index_repository_background_job_lifecycle) {
+    char repo[256];
+    snprintf(repo, sizeof(repo), "/tmp/cbm-index-job-repo-XXXXXX");
+    if (!cbm_mkdtemp(repo)) {
+        PASS();
+    }
+    char source_path[512];
+    snprintf(source_path, sizeof(source_path), "%s/main.c", repo);
+    FILE *source = fopen(source_path, "w");
+    ASSERT_NOT_NULL(source);
+    fputs("int answer(void) { return 42; }\n", source);
+    fclose(source);
+
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-index-job-cache-XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char args[768];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\"}", repo);
+    char *raw = cbm_mcp_handle_tool(srv, "index_repository", args);
+    ASSERT_NOT_NULL(raw);
+    char *inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(inner);
+
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    const char *job = yyjson_get_str(yyjson_obj_get(root, "job_id"));
+    ASSERT_NOT_NULL(job);
+    char job_id[64];
+    snprintf(job_id, sizeof(job_id), "%s", job);
+    ASSERT_NOT_NULL(yyjson_obj_get(root, "phase"));
+    ASSERT_NOT_NULL(yyjson_obj_get(root, "done"));
+    ASSERT_NOT_NULL(yyjson_obj_get(root, "total"));
+    ASSERT_NOT_NULL(yyjson_obj_get(root, "heartbeat_age_ms"));
+    ASSERT_NOT_NULL(yyjson_obj_get(root, "elapsed_ms"));
+    yyjson_doc_free(doc);
+    free(inner);
+    free(raw);
+
+    char status_args[160];
+    snprintf(status_args, sizeof(status_args), "{\"job_id\":\"%s\"}", job_id);
+    raw = cbm_mcp_handle_tool(srv, "index_status", status_args);
+    ASSERT_NOT_NULL(raw);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, job_id));
+    ASSERT_NOT_NULL(strstr(inner, "\"current_file\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"heartbeat_age_ms\""));
+    free(inner);
+    free(raw);
+
+    raw = cbm_mcp_handle_tool(srv, "cancel_index", status_args);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, job_id));
+    free(raw);
+    cbm_mcp_server_free(srv); /* must cancel and join any still-running worker */
+
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(repo);
+    th_rmtree(cache);
+    PASS();
+}
+
 TEST(tool_get_code_snippet_missing_qn) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -1407,6 +1500,184 @@ static char *extract_text_content(const char *mcp_result) {
     char *result = str ? strdup(str) : strdup(mcp_result);
     yyjson_doc_free(doc);
     return result;
+}
+
+TEST(tool_index_freshness_states_and_prune_stays_dry_run) {
+    char repo[256];
+    char cache[256];
+    snprintf(repo, sizeof(repo), "/tmp/cbm-freshness-repo-XXXXXX");
+    snprintf(cache, sizeof(cache), "/tmp/cbm-freshness-cache-XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+
+    char source_path[512];
+    snprintf(source_path, sizeof(source_path), "%s/main.c", repo);
+    ASSERT_EQ(th_write_file(source_path, "int answer(void) { return 1; }\n"), 0);
+
+    char *project = cbm_project_name_from_path(repo);
+    ASSERT_NOT_NULL(project);
+    char db_path[768];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
+
+    cbm_pipeline_t *pipeline = cbm_pipeline_new(repo, db_path, CBM_MODE_FAST);
+    ASSERT_NOT_NULL(pipeline);
+    ASSERT_EQ(cbm_pipeline_run(pipeline), 0);
+    cbm_pipeline_free(pipeline);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char args[512];
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", project);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "index_status", args);
+    char *inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"status\":\"ready\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"freshness_contract_version\":1"));
+    ASSERT_NOT_NULL(strstr(inner, "\"stored_source_fingerprint\":\"stat-v1:"));
+    free(inner);
+    free(raw);
+
+    raw = cbm_mcp_handle_tool(srv, "prune_index", args);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"dry_run\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"candidate\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"deleted\":false"));
+    free(inner);
+    free(raw);
+
+    ASSERT_EQ(th_write_file(source_path, "int answer(void) { return 4242; }\n"), 0);
+    raw = cbm_mcp_handle_tool(srv, "index_status", args);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"status\":\"stale_source\""));
+    free(inner);
+    free(raw);
+    cbm_mcp_server_free(srv);
+
+    cbm_store_t *write_store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(write_store);
+    cbm_index_metadata_t existing = {0};
+    ASSERT_EQ(cbm_store_get_index_metadata(write_store, project, &existing), CBM_STORE_OK);
+    cbm_index_metadata_t extractor_changed = {
+        .project = project,
+        .source_fingerprint = existing.source_fingerprint,
+        .extractor_id = "different-extractor-build",
+        .file_count = existing.file_count,
+        .mode = existing.mode,
+        .complete = true,
+    };
+    ASSERT_EQ(cbm_store_upsert_index_metadata(write_store, &extractor_changed), CBM_STORE_OK);
+    cbm_index_metadata_free_fields(&existing);
+    cbm_store_close(write_store);
+
+    srv = cbm_mcp_server_new(NULL);
+    raw = cbm_mcp_handle_tool(srv, "index_status", args);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"status\":\"stale_extractor\""));
+    free(inner);
+    free(raw);
+    cbm_mcp_server_free(srv);
+
+    write_store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(write_store);
+    ASSERT_EQ(cbm_store_exec(write_store, "DELETE FROM index_metadata;"), CBM_STORE_OK);
+    cbm_store_close(write_store);
+    srv = cbm_mcp_server_new(NULL);
+    raw = cbm_mcp_handle_tool(srv, "index_status", args);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"status\":\"partial\""));
+    free(inner);
+    free(raw);
+    cbm_mcp_server_free(srv);
+
+    char moved_repo[320];
+    snprintf(moved_repo, sizeof(moved_repo), "%s-moved", repo);
+    ASSERT_EQ(rename(repo, moved_repo), 0);
+    struct stat before;
+    struct stat after;
+    ASSERT_EQ(stat(db_path, &before), 0);
+    srv = cbm_mcp_server_new(NULL);
+    raw = cbm_mcp_handle_tool(srv, "index_status", args);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"status\":\"missing_root\""));
+    free(inner);
+    free(raw);
+
+    raw = cbm_mcp_handle_tool(srv, "prune_index", args);
+    inner = extract_text_content(raw);
+    ASSERT_NOT_NULL(strstr(inner, "\"candidate\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"action\":\"would_prune\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"deleted\":false"));
+    free(inner);
+    free(raw);
+    ASSERT_EQ(stat(db_path, &after), 0);
+    ASSERT_EQ((long long)before.st_size, (long long)after.st_size);
+
+    char destructive_args[560];
+    snprintf(destructive_args, sizeof(destructive_args),
+             "{\"project\":\"%s\",\"dry_run\":false}", project);
+    raw = cbm_mcp_handle_tool(srv, "prune_index", destructive_args);
+    ASSERT_NOT_NULL(strstr(raw, "dry-run only"));
+    free(raw);
+    ASSERT_EQ(stat(db_path, &after), 0);
+    cbm_mcp_server_free(srv);
+
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+        free(saved_cache_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(moved_repo);
+    th_rmtree(cache);
+    free(project);
+    PASS();
+}
+
+TEST(tool_corrupt_index_is_reported_without_auto_delete) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-corrupt-index-cache-XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/corrupt-index.db", cache);
+
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "corrupt-index", "12345"), CBM_STORE_OK);
+    ASSERT_FALSE(cbm_store_check_integrity(store));
+    cbm_store_close(store);
+    ASSERT_EQ(access(db_path, F_OK), 0);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    const char *args = "{\"project\":\"corrupt-index\"}";
+    char *raw = cbm_mcp_handle_tool(srv, "index_status", args);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "not indexed"));
+    free(raw);
+    ASSERT_EQ(access(db_path, F_OK), 0);
+
+    raw = cbm_mcp_handle_tool(srv, "prune_index", args);
+    ASSERT_NOT_NULL(raw);
+    free(raw);
+    ASSERT_EQ(access(db_path, F_OK), 0);
+    cbm_mcp_server_free(srv);
+
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+        free(saved_cache_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(cache);
+    PASS();
 }
 
 /* Call get_code_snippet and extract inner text content.
@@ -2325,6 +2596,7 @@ SUITE(mcp) {
     /* MCP protocol helpers */
     RUN_TEST(mcp_initialize_response);
     RUN_TEST(mcp_tools_list);
+    RUN_TEST(mcp_tools_list_exposes_a_machine_readable_capability_contract);
     RUN_TEST(mcp_tools_array_schemas_have_items);
     RUN_TEST(mcp_text_result);
     RUN_TEST(mcp_text_result_error);
@@ -2375,6 +2647,8 @@ SUITE(mcp) {
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_index_status_no_project);
     RUN_TEST(tool_index_status_includes_git_metadata);
+    RUN_TEST(tool_index_freshness_states_and_prune_stays_dry_run);
+    RUN_TEST(tool_corrupt_index_is_reported_without_auto_delete);
 
     /* Tool handlers with validation */
     RUN_TEST(tool_trace_call_path_not_found);
@@ -2388,6 +2662,7 @@ SUITE(mcp) {
 
     /* Pipeline-dependent tool handlers */
     RUN_TEST(tool_index_repository_missing_path);
+    RUN_TEST(tool_index_repository_background_job_lifecycle);
     RUN_TEST(tool_get_code_snippet_missing_qn);
     RUN_TEST(tool_get_code_snippet_not_found);
     RUN_TEST(tool_search_code_missing_pattern);

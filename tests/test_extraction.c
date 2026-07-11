@@ -37,6 +37,16 @@ static int has_call(CBMFileResult *r, const char *callee) {
     return 0;
 }
 
+/* Check if any read/write table reference exists. */
+static int has_rw(CBMFileResult *r, const char *name, bool is_write) {
+    for (int i = 0; i < r->rw.count; i++) {
+        if (strcmp(r->rw.items[i].var_name, name) == 0 &&
+            r->rw.items[i].is_write == is_write)
+            return 1;
+    }
+    return 0;
+}
+
 /* Check if any import with the given module path exists. */
 static int __attribute__((unused)) has_import(CBMFileResult *r, const char *path_substr) {
     for (int i = 0; i < r->imports.count; i++) {
@@ -62,6 +72,35 @@ static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *pro
                               const char *path) {
     CBMFileResult *r = cbm_extract_file(src, (int)strlen(src), lang, proj, path, 0, NULL, NULL);
     return r;
+}
+
+TEST(t100_4gl_extracts_functions_calls_and_tables) {
+    CBMFileResult *r = extract("MAIN\n"
+                               "    CALL s_axmt500_get_credit('5', sr1.xmdk007)\n"
+                               "    SELECT * FROM xmda_t WHERE xmdaent = g_enterprise\n"
+                               "    SELECT ima01 FROM ima_file WHERE ima01 = p_cust\n"
+                               "    update xmdc_t set xmdcstus = 'Y'\n"
+                               "END MAIN\n"
+                               "\n"
+                               "FUNCTION s_axmt500_get_credit(p_type, p_cust)\n"
+                               "    call cl_err('x')\n"
+                               "END FUNCTION\n",
+                               CBM_LANG_T100_4GL, "t100", "erp/axm/4gl/axmt500.4gl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Module", "axmt500"));
+    ASSERT(has_def(r, "Function", "axmt500_main"));
+    ASSERT(has_def(r, "Function", "s_axmt500_get_credit"));
+    ASSERT(has_call(r, "s_axmt500_get_credit"));
+    ASSERT(has_call(r, "cl_err"));
+    ASSERT(has_def(r, "Table", "xmda_t"));
+    ASSERT(has_def(r, "Table", "xmdc_t"));
+    ASSERT(has_def(r, "Table", "ima_file"));
+    ASSERT(has_rw(r, "xmda_t", false));
+    ASSERT(has_rw(r, "xmdc_t", true));
+    ASSERT(has_rw(r, "ima_file", false));
+    cbm_free_result(r);
+    PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -3127,6 +3166,7 @@ SUITE(extraction) {
     RUN_TEST(complexity_recursion_in_loop_unguarded);
     RUN_TEST(complexity_guarded_recursion);
     RUN_TEST(complexity_access_depth_and_params);
+    RUN_TEST(t100_4gl_extracts_functions_calls_and_tables);
 
     cbm_shutdown();
 }
