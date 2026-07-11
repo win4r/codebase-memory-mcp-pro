@@ -1039,6 +1039,14 @@ TEST(lang_ext_sosl) {
     PASS();
 }
 
+TEST(lang_ext_t100_tiptop) {
+    ASSERT_EQ(cbm_language_for_extension(".4gl"), CBM_LANG_T100_4GL);
+    ASSERT_EQ(cbm_language_for_extension(".per"), CBM_LANG_T100_4GL);
+    ASSERT_EQ(cbm_language_for_extension(".42m"), CBM_LANG_T100_4GL);
+    ASSERT_EQ(cbm_language_for_extension(".sch"), CBM_LANG_T100_4GL);
+    PASS();
+}
+
 /* --- Ported from lang_test.go: TestForLanguage --- */
 TEST(lang_all_have_names) {
     /* Every language enum value from 0 to CBM_LANG_COUNT-1
@@ -1287,6 +1295,7 @@ SUITE(language) {
     RUN_TEST(lang_ext_apex);
     RUN_TEST(lang_ext_soql);
     RUN_TEST(lang_ext_sosl);
+    RUN_TEST(lang_ext_t100_tiptop);
 
     RUN_TEST(lang_all_have_names);
 }

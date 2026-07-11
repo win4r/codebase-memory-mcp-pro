@@ -52,6 +52,7 @@ void cbm_pkg_entries_free(cbm_pkg_entries_t *e);
 /* Shared context passed to each pass function.
  * Derived from cbm_pipeline_t fields during run. */
 typedef struct {
+    cbm_pipeline_t *pipeline;   /* borrowed owner; used for progress snapshots */
     const char *project_name; /* borrowed from pipeline */
     const char *repo_path;    /* borrowed from pipeline */
     cbm_gbuf_t *gbuf;         /* owned by pipeline */
@@ -132,6 +133,11 @@ void cbm_pkgmap_free(CBMHashTable *pkgmap);
 static inline int cbm_pipeline_check_cancel(const cbm_pipeline_ctx_t *ctx) {
     return atomic_load(ctx->cancelled) ? CBM_NOT_FOUND : 0;
 }
+
+/* Update observable lifecycle state. current_file="" clears the file field;
+ * NULL leaves it unchanged. This is safe from parallel extraction workers. */
+void cbm_pipeline_progress_update(cbm_pipeline_t *p, const char *phase,
+                                  const char *current_file, int done, int total);
 
 /* ── Testable helpers ────────────────────────────────────────────── */
 

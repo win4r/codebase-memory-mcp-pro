@@ -16,6 +16,7 @@
 #define CBM_PIPELINE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Forward declarations */
@@ -25,6 +26,42 @@ typedef struct cbm_gbuf cbm_gbuf_t;
 /* ── Opaque handle ──────────────────────────────────────────────── */
 
 typedef struct cbm_pipeline cbm_pipeline_t;
+
+/* Thread-safe snapshot of an indexing run. Strings are copied into the
+ * caller-owned snapshot so they remain valid while worker threads advance. */
+typedef struct {
+    char phase[64];
+    char current_file[512];
+    int done;
+    int total;
+    bool cancelled;
+    int64_t elapsed_ms;
+    int64_t heartbeat_age_ms;
+} cbm_pipeline_progress_t;
+
+/* Persisted index freshness contract. These states intentionally separate a
+ * changed source tree from an extractor/build upgrade and from an incomplete
+ * or legacy index that lacks enough provenance to make either claim. */
+typedef enum {
+    CBM_FRESHNESS_READY = 0,
+    CBM_FRESHNESS_STALE_SOURCE,
+    CBM_FRESHNESS_STALE_EXTRACTOR,
+    CBM_FRESHNESS_MISSING_ROOT,
+    CBM_FRESHNESS_PARTIAL,
+} cbm_freshness_state_t;
+
+typedef struct {
+    bool root_exists;
+    bool metadata_present;
+    bool complete;
+    int node_count;
+    int indexed_file_count;
+    int stored_file_count;
+    const char *stored_source_fingerprint;
+    const char *current_source_fingerprint;
+    const char *stored_extractor_id;
+    const char *current_extractor_id;
+} cbm_freshness_input_t;
 
 /* ── Index mode ─────────────────────────────────────────────────── */
 
@@ -58,6 +95,23 @@ int cbm_pipeline_run(cbm_pipeline_t *p);
 
 /* Request cancellation of a running pipeline (thread-safe). */
 void cbm_pipeline_cancel(cbm_pipeline_t *p);
+
+/* Copy the current lifecycle/progress state into out. Returns 0 on success,
+ * -1 for NULL arguments. Safe to call while the pipeline is running. */
+int cbm_pipeline_get_progress(cbm_pipeline_t *p, cbm_pipeline_progress_t *out);
+
+/* Classify an index from already-collected evidence. Pure and thread-safe. */
+cbm_freshness_state_t cbm_pipeline_classify_freshness(const cbm_freshness_input_t *input);
+const char *cbm_freshness_state_name(cbm_freshness_state_t state);
+
+/* Compute a deterministic stat-based source-tree fingerprint over the files
+ * selected by the requested index mode. Writes the discovered file count to
+ * file_count when non-NULL. */
+int cbm_pipeline_compute_source_fingerprint(const char *repo_path, cbm_index_mode_t mode,
+                                            char *out, size_t out_size, int *file_count);
+
+/* Build/extractor identity persisted with each successful index. */
+const char *cbm_pipeline_extractor_id(void);
 
 /* Get the project name derived from repo_path. Returned string is
  * owned by the pipeline. Valid until cbm_pipeline_free(). */

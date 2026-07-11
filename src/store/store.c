@@ -219,6 +219,14 @@ static int init_schema(cbm_store_t *s) {
         "  indexed_at TEXT NOT NULL,"
         "  root_path TEXT NOT NULL"
         ");"
+        "CREATE TABLE IF NOT EXISTS index_metadata ("
+        "  project TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,"
+        "  source_fingerprint TEXT NOT NULL,"
+        "  extractor_id TEXT NOT NULL,"
+        "  file_count INTEGER NOT NULL DEFAULT 0,"
+        "  mode INTEGER NOT NULL DEFAULT 0,"
+        "  complete INTEGER NOT NULL DEFAULT 0"
+        ");"
         "CREATE TABLE IF NOT EXISTS file_hashes ("
         "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
         "  rel_path TEXT NOT NULL,"
@@ -1027,6 +1035,66 @@ int cbm_store_delete_project(cbm_store_t *s, const char *name) {
         return CBM_STORE_ERR;
     }
     return CBM_STORE_OK;
+}
+
+int cbm_store_upsert_index_metadata(cbm_store_t *s, const cbm_index_metadata_t *metadata) {
+    if (!s || !metadata || !metadata->project || !metadata->source_fingerprint ||
+        !metadata->extractor_id) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "INSERT INTO index_metadata "
+        "(project, source_fingerprint, extractor_id, file_count, mode, complete) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6) "
+        "ON CONFLICT(project) DO UPDATE SET source_fingerprint=?2, extractor_id=?3, "
+        "file_count=?4, mode=?5, complete=?6;";
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "upsert_index_metadata.prepare");
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, metadata->project);
+    bind_text(stmt, ST_COL_2, metadata->source_fingerprint);
+    bind_text(stmt, ST_COL_3, metadata->extractor_id);
+    sqlite3_bind_int(stmt, CBM_SZ_4, metadata->file_count);
+    sqlite3_bind_int(stmt, CBM_SZ_5, metadata->mode);
+    sqlite3_bind_int(stmt, CBM_SZ_6, metadata->complete ? 1 : 0);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        store_set_error_sqlite(s, "upsert_index_metadata");
+        return CBM_STORE_ERR;
+    }
+    return CBM_STORE_OK;
+}
+
+int cbm_store_get_index_metadata(cbm_store_t *s, const char *project,
+                                 cbm_index_metadata_t *out) {
+    if (!s || !project || !out) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT project, source_fingerprint, extractor_id, file_count, mode, "
+                      "complete FROM index_metadata WHERE project=?1;";
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "get_index_metadata.prepare");
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        out->project = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
+        out->source_fingerprint =
+            heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
+        out->extractor_id = heap_strdup((const char *)sqlite3_column_text(stmt, CBM_SZ_2));
+        out->file_count = sqlite3_column_int(stmt, CBM_SZ_3);
+        out->mode = sqlite3_column_int(stmt, CBM_SZ_4);
+        out->complete = sqlite3_column_int(stmt, CBM_SZ_5) != 0;
+        sqlite3_finalize(stmt);
+        return CBM_STORE_OK;
+    }
+    sqlite3_finalize(stmt);
+    return CBM_STORE_NOT_FOUND;
 }
 
 /* ── Node CRUD ──────────────────────────────────────────────────── */
@@ -5538,6 +5606,16 @@ void cbm_project_free_fields(cbm_project_t *p) {
     safe_str_free(&p->name);
     safe_str_free(&p->indexed_at);
     safe_str_free(&p->root_path);
+}
+
+void cbm_index_metadata_free_fields(cbm_index_metadata_t *metadata) {
+    if (!metadata) {
+        return;
+    }
+    safe_str_free(&metadata->project);
+    safe_str_free(&metadata->source_fingerprint);
+    safe_str_free(&metadata->extractor_id);
+    memset(metadata, 0, sizeof(*metadata));
 }
 
 void cbm_store_free_projects(cbm_project_t *projects, int count) {

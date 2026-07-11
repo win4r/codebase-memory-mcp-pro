@@ -445,6 +445,18 @@ static const ext_entry_t EXT_TABLE[] = {
     {".cfc", CBM_LANG_CFSCRIPT},
     {".cfm", CBM_LANG_CFML},
 
+    /* T100 / TIPTOP 4GL-family sources */
+    {".4gl", CBM_LANG_T100_4GL},
+    {".per", CBM_LANG_T100_4GL},
+    {".42m", CBM_LANG_T100_4GL},
+    {".sch", CBM_LANG_T100_4GL},
+    {".4fd", CBM_LANG_T100_4GL},
+    {".4tm", CBM_LANG_T100_4GL},
+    {".42s", CBM_LANG_T100_4GL},
+    {".42r", CBM_LANG_T100_4GL},
+    {".42f", CBM_LANG_T100_4GL},
+    {".4rp", CBM_LANG_T100_4GL},
+
     /* Mermaid */
     {".mermaid", CBM_LANG_MERMAID},
 
@@ -834,6 +846,7 @@ static const char *LANG_NAMES[CBM_LANG_COUNT] = {
     [CBM_LANG_APEX] = "Apex",
     [CBM_LANG_SOQL] = "SOQL",
     [CBM_LANG_SOSL] = "SOSL",
+    [CBM_LANG_T100_4GL] = "T100 4GL",
 
 };
 

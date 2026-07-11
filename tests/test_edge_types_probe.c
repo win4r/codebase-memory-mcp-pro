@@ -111,7 +111,7 @@ static cbm_store_t *et_index_files(EtProj *lp, const EtFile *files, int nfiles) 
     if (!lp->srv) return NULL;
 
     char args[700];
-    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"background\":false}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
 

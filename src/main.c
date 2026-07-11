@@ -21,6 +21,7 @@
 #include "cli/cli.h"
 #include "cli/progress_sink.h"
 #include "foundation/constants.h"
+#include "foundation/build_info.h"
 
 enum {
     MAIN_MIN_ARGC = 1,
@@ -50,10 +51,6 @@ enum {
 #include <string.h>
 #include <signal.h>
 #include <stdatomic.h>
-
-#ifndef CBM_VERSION
-#define CBM_VERSION "dev"
-#endif
 
 /* ── Globals for signal handling ────────────────────────────────── */
 
@@ -288,7 +285,8 @@ static void print_help(void) {
     printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run]\n");
     printf("  codebase-memory-mcp update [-y|-n]\n");
     printf("  codebase-memory-mcp config <list|get|set|reset>\n");
-    printf("  codebase-memory-mcp --version    Print version\n");
+    printf("  codebase-memory-mcp --version    Print version + build provenance\n");
+    printf("  codebase-memory-mcp --manifest   Print machine-readable capabilities\n");
     printf("  codebase-memory-mcp --help       Print this help\n");
     printf("\nUI options:\n");
     printf("  --ui=true    Enable HTTP graph visualization (persisted)\n");
@@ -299,7 +297,8 @@ static void print_help(void) {
     printf("  Antigravity, Aider, KiloCode, Kiro\n");
     printf("\nTools: index_repository, search_graph, query_graph, trace_path,\n");
     printf("  get_code_snippet, get_graph_schema, get_architecture, search_code,\n");
-    printf("  list_projects, delete_project, index_status, detect_changes,\n");
+    printf("  list_projects, delete_project, index_status, cancel_index, prune_index,\n");
+    printf("  detect_changes,\n");
     printf("  manage_adr, ingest_traces\n");
 }
 
@@ -316,7 +315,18 @@ static int handle_subcommand(int argc, char **argv) {
     }
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
-            printf("codebase-memory-mcp %s\n", CBM_VERSION);
+            printf("codebase-memory-mcp %s commit=%s dirty=%s build=%s\n", CBM_VERSION,
+                   CBM_GIT_COMMIT, CBM_GIT_DIRTY, CBM_BUILD_ID);
+            return 0;
+        }
+        if (strcmp(argv[i], "--manifest") == 0) {
+            char *manifest = cbm_mcp_tools_list();
+            if (!manifest) {
+                fprintf(stderr, "failed to build capability manifest\n");
+                return 1;
+            }
+            printf("%s\n", manifest);
+            free(manifest);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {

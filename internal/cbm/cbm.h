@@ -170,6 +170,7 @@ typedef enum {
     CBM_LANG_QML,       // Qt QML (Qt Modeling Language — declarative UI + embedded JS)
     CBM_LANG_CFSCRIPT,  // CFML script dialect (.cfc components — Lucee/ColdFusion)
     CBM_LANG_CFML,      // CFML tag dialect (.cfm templates — Lucee/ColdFusion)
+    CBM_LANG_T100_4GL,  // T100/TIPTOP 4GL-family sources (.4gl/.per/.42m/.sch)
     CBM_LANG_COUNT
 } CBMLanguage;
 
@@ -591,6 +592,7 @@ void cbm_extract_type_refs(CBMExtractCtx *ctx);
 void cbm_extract_env_accesses(CBMExtractCtx *ctx);
 void cbm_extract_type_assigns(CBMExtractCtx *ctx);
 void cbm_extract_channels(CBMExtractCtx *ctx);
+void cbm_extract_t100_4gl(CBMExtractCtx *ctx);
 
 // Single-pass unified extraction (replaces the 7 calls above except defs+imports).
 void cbm_extract_unified(CBMExtractCtx *ctx);

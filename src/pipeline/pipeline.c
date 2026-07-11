@@ -32,6 +32,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, P
 #include "foundation/compat_thread.h"
 #include "foundation/profile.h"
 #include "foundation/mem.h"
+#include "foundation/build_info.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -79,6 +80,13 @@ struct cbm_pipeline {
     char *branch_qn;
     cbm_index_mode_t mode;
     atomic_int cancelled;
+    atomic_flag progress_lock;
+    char progress_phase[64];
+    char progress_current_file[512];
+    int progress_done;
+    int progress_total;
+    struct timespec progress_started_at;
+    struct timespec progress_heartbeat_at;
     bool persistence; /* write .codebase-memory/graph.db.zst after indexing */
 
     /* Indexing state (set during run) */
@@ -120,6 +128,59 @@ static double elapsed_ms(struct timespec start) {
            ((double)(now.tv_nsec - start.tv_nsec) / CBM_US_PER_SEC_F);
 }
 
+static int64_t elapsed_ms_i64(struct timespec start, struct timespec end) {
+    int64_t sec = (int64_t)end.tv_sec - (int64_t)start.tv_sec;
+    int64_t nsec = (int64_t)end.tv_nsec - (int64_t)start.tv_nsec;
+    return (sec * CBM_MS_PER_SEC) + (nsec / 1000000LL);
+}
+
+static void progress_lock(cbm_pipeline_t *p) {
+    while (atomic_flag_test_and_set_explicit(&p->progress_lock, memory_order_acquire)) {
+    }
+}
+
+static void progress_unlock(cbm_pipeline_t *p) {
+    atomic_flag_clear_explicit(&p->progress_lock, memory_order_release);
+}
+
+void cbm_pipeline_progress_update(cbm_pipeline_t *p, const char *phase,
+                                  const char *current_file, int done, int total) {
+    if (!p) {
+        return;
+    }
+    struct timespec now;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &now);
+    progress_lock(p);
+    if (phase) {
+        snprintf(p->progress_phase, sizeof(p->progress_phase), "%s", phase);
+    }
+    if (current_file) {
+        snprintf(p->progress_current_file, sizeof(p->progress_current_file), "%s", current_file);
+    }
+    p->progress_done = done;
+    p->progress_total = total;
+    p->progress_heartbeat_at = now;
+    progress_unlock(p);
+}
+
+int cbm_pipeline_get_progress(cbm_pipeline_t *p, cbm_pipeline_progress_t *out) {
+    if (!p || !out) {
+        return CBM_NOT_FOUND;
+    }
+    struct timespec now;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &now);
+    progress_lock(p);
+    snprintf(out->phase, sizeof(out->phase), "%s", p->progress_phase);
+    snprintf(out->current_file, sizeof(out->current_file), "%s", p->progress_current_file);
+    out->done = p->progress_done;
+    out->total = p->progress_total;
+    out->elapsed_ms = elapsed_ms_i64(p->progress_started_at, now);
+    out->heartbeat_age_ms = elapsed_ms_i64(p->progress_heartbeat_at, now);
+    progress_unlock(p);
+    out->cancelled = atomic_load(&p->cancelled) != 0;
+    return 0;
+}
+
 /* Format int to string for logging. Thread-safe via TLS rotating buffers. */
 static const char *itoa_buf(int val) {
     static CBM_TLS char bufs[PL_RING][CBM_SZ_32];
@@ -159,6 +220,11 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path,
     p->mode = mode;
     p->persistence = false;
     atomic_init(&p->cancelled, 0);
+    atomic_flag_clear(&p->progress_lock);
+    snprintf(p->progress_phase, sizeof(p->progress_phase), "%s", "queued");
+    p->progress_current_file[0] = '\0';
+    cbm_clock_gettime(CLOCK_MONOTONIC, &p->progress_started_at);
+    p->progress_heartbeat_at = p->progress_started_at;
 
     return p;
 }
@@ -591,6 +657,7 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     };
     int rc = 0;
     for (int si = 0; si < PL_SEQ_PASSES && rc == 0; si++) {
+        cbm_pipeline_progress_update(p, seq_passes[si].name, "", 0, file_count);
         cbm_clock_gettime(CLOCK_MONOTONIC, t);
         int pr = seq_passes[si].fn(ctx, files, file_count);
         if (pr != 0 && !seq_passes[si].ignore_err) {
@@ -636,6 +703,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         return CBM_NOT_FOUND;
     }
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
+    cbm_pipeline_progress_update(p, "extracting", "", 0, file_count);
     int rc = cbm_parallel_extract(ctx, files, file_count, cache, &shared_ids, worker_count);
     cbm_log_info("pass.timing", "pass", "parallel_extract", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
@@ -653,6 +721,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     cbm_log_info("mem.collect", "phase", "post_extract", "rss_mb",
                  itoa_buf((int)(cbm_mem_rss() / (1024 * 1024))));
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
+    cbm_pipeline_progress_update(p, "registry", "", file_count, file_count);
     rc = cbm_build_registry_from_cache(ctx, files, file_count, cache);
     cbm_log_info("pass.timing", "pass", "registry_build", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
@@ -726,6 +795,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                  itoa_buf((int)elapsed_ms(*t)));
     log_phase_mem("lsp_cross_prepare");
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
+    cbm_pipeline_progress_update(p, "resolving", "", 0, file_count);
     rc = cbm_parallel_resolve(ctx, files, file_count, cache, &shared_ids, worker_count, all_defs,
                               def_count, def_modules, module_def_index, &cross_registries);
     cbm_log_info("pass.timing", "pass", "parallel_resolve", "elapsed_ms",
@@ -776,16 +846,32 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
         int hash_count = 0;
         cbm_store_get_file_hashes(check_store, p->project_name, &hashes, &hash_count);
         cbm_store_free_file_hashes(hashes, hash_count);
+
+        cbm_index_metadata_t metadata = {0};
+        int metadata_rc =
+            cbm_store_get_index_metadata(check_store, p->project_name, &metadata);
+        bool metadata_compatible =
+            metadata_rc == CBM_STORE_OK && metadata.complete && metadata.extractor_id &&
+            strcmp(metadata.extractor_id, cbm_pipeline_extractor_id()) == 0;
+        const char *reindex_reason = metadata_rc != CBM_STORE_OK
+                                         ? "missing_metadata"
+                                         : (!metadata.complete
+                                                ? "partial_metadata"
+                                                : "extractor_changed");
+        cbm_index_metadata_free_fields(&metadata);
         cbm_store_close(check_store);
-        if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
+        if (metadata_compatible && hash_count > 0 &&
+            file_count <= hash_count + (hash_count / PAIR_LEN)) {
             cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
                          itoa_buf(hash_count));
             int rc = cbm_pipeline_run_incremental(p, db_path, files, file_count);
             free(db_path);
             return rc;
         }
-        if (hash_count > 0) {
-            cbm_log_info("pipeline.route", "path", "mode_change_reindex", "stored_hashes",
+        if (!metadata_compatible) {
+            cbm_log_info("pipeline.route", "path", "full_reindex", "reason", reindex_reason);
+        } else if (hash_count > 0) {
+            cbm_log_info("pipeline.route", "path", "file_count_reindex", "stored_hashes",
                          itoa_buf(hash_count), "discovered", itoa_buf(file_count));
         }
     } else if (check_store) {
@@ -831,6 +917,139 @@ static int64_t stat_mtime_ns(const struct stat *fst) {
 #endif
 }
 
+/* ── Freshness contract ─────────────────────────────────────────── */
+
+static bool freshness_string_present(const char *value) {
+    return value && value[0] != '\0';
+}
+
+cbm_freshness_state_t cbm_pipeline_classify_freshness(const cbm_freshness_input_t *input) {
+    if (!input) {
+        return CBM_FRESHNESS_PARTIAL;
+    }
+    if (!input->root_exists) {
+        return CBM_FRESHNESS_MISSING_ROOT;
+    }
+    if (!input->metadata_present || !input->complete || input->node_count <= 0 ||
+        input->indexed_file_count < 0 || input->stored_file_count < 0 ||
+        input->indexed_file_count != input->stored_file_count ||
+        !freshness_string_present(input->stored_source_fingerprint) ||
+        !freshness_string_present(input->current_source_fingerprint) ||
+        !freshness_string_present(input->stored_extractor_id) ||
+        !freshness_string_present(input->current_extractor_id)) {
+        return CBM_FRESHNESS_PARTIAL;
+    }
+    if (strcmp(input->stored_extractor_id, input->current_extractor_id) != 0) {
+        return CBM_FRESHNESS_STALE_EXTRACTOR;
+    }
+    if (strcmp(input->stored_source_fingerprint, input->current_source_fingerprint) != 0) {
+        return CBM_FRESHNESS_STALE_SOURCE;
+    }
+    return CBM_FRESHNESS_READY;
+}
+
+const char *cbm_freshness_state_name(cbm_freshness_state_t state) {
+    switch (state) {
+    case CBM_FRESHNESS_READY:
+        return "ready";
+    case CBM_FRESHNESS_STALE_SOURCE:
+        return "stale_source";
+    case CBM_FRESHNESS_STALE_EXTRACTOR:
+        return "stale_extractor";
+    case CBM_FRESHNESS_MISSING_ROOT:
+        return "missing_root";
+    case CBM_FRESHNESS_PARTIAL:
+    default:
+        return "partial";
+    }
+}
+
+const char *cbm_pipeline_extractor_id(void) {
+    return CBM_BUILD_ID;
+}
+
+static uint64_t fingerprint_update(uint64_t hash, const void *data, size_t len) {
+    const unsigned char *bytes = (const unsigned char *)data;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static int fingerprint_file_ptr_cmp(const void *lhs, const void *rhs) {
+    const cbm_file_info_t *const *a = (const cbm_file_info_t *const *)lhs;
+    const cbm_file_info_t *const *b = (const cbm_file_info_t *const *)rhs;
+    return strcmp((*a)->rel_path, (*b)->rel_path);
+}
+
+static int compute_fingerprint_from_files(const cbm_file_info_t *files, int count,
+                                          cbm_index_mode_t mode, char *out, size_t out_size) {
+    if ((!files && count > 0) || count < 0 || !out || out_size == 0) {
+        return CBM_NOT_FOUND;
+    }
+
+    const cbm_file_info_t **sorted = NULL;
+    if (count > 0) {
+        sorted = malloc((size_t)count * sizeof(*sorted));
+        if (!sorted) {
+            return CBM_NOT_FOUND;
+        }
+        for (int i = 0; i < count; i++) {
+            sorted[i] = &files[i];
+        }
+        qsort(sorted, (size_t)count, sizeof(*sorted), fingerprint_file_ptr_cmp);
+    }
+
+    uint64_t hash = UINT64_C(1469598103934665603);
+    char mode_buf[32];
+    int mode_len = snprintf(mode_buf, sizeof(mode_buf), "mode=%d\n", (int)mode);
+    hash = fingerprint_update(hash, mode_buf, (size_t)mode_len);
+
+    for (int i = 0; i < count; i++) {
+        struct stat fst;
+        if (stat(sorted[i]->path, &fst) != 0) {
+            free(sorted);
+            return CBM_NOT_FOUND;
+        }
+        char stat_buf[128];
+        int stat_len = snprintf(stat_buf, sizeof(stat_buf), "\n%lld\n%lld\n",
+                                (long long)fst.st_size, (long long)stat_mtime_ns(&fst));
+        hash = fingerprint_update(hash, sorted[i]->rel_path, strlen(sorted[i]->rel_path));
+        hash = fingerprint_update(hash, stat_buf, (size_t)stat_len);
+    }
+    free(sorted);
+
+    int written = snprintf(out, out_size, "stat-v1:%016llx:%d", (unsigned long long)hash, count);
+    return (written >= 0 && (size_t)written < out_size) ? 0 : CBM_NOT_FOUND;
+}
+
+int cbm_pipeline_compute_source_fingerprint(const char *repo_path, cbm_index_mode_t mode,
+                                            char *out, size_t out_size, int *file_count) {
+    if (file_count) {
+        *file_count = 0;
+    }
+    if (!repo_path || !out || out_size == 0) {
+        return CBM_NOT_FOUND;
+    }
+    cbm_discover_opts_t opts = {
+        .mode = mode,
+        .ignore_file = NULL,
+        .max_file_size = 0,
+    };
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+    if (cbm_discover(repo_path, &opts, &files, &count) != 0) {
+        return CBM_NOT_FOUND;
+    }
+    int rc = compute_fingerprint_from_files(files, count, mode, out, out_size);
+    cbm_discover_free(files, count);
+    if (rc == 0 && file_count) {
+        *file_count = count;
+    }
+    return rc;
+}
+
 /* Dump graph to SQLite and persist file hashes for incremental indexing. */
 static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *files, int file_count,
                                    struct timespec *t) {
@@ -874,6 +1093,19 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
             }
         }
 
+        char source_fingerprint[96] = "";
+        int fingerprint_rc = compute_fingerprint_from_files(
+            files, file_count, p->mode, source_fingerprint, sizeof(source_fingerprint));
+        cbm_index_metadata_t metadata = {
+            .project = p->project_name,
+            .source_fingerprint = source_fingerprint,
+            .extractor_id = cbm_pipeline_extractor_id(),
+            .file_count = file_count,
+            .mode = (int)p->mode,
+            .complete = fingerprint_rc == 0,
+        };
+        int metadata_rc = cbm_store_upsert_index_metadata(hash_store, &metadata);
+
         /* FTS5 backfill: populate nodes_fts with camelCase-split names.
          * Contentless FTS5 requires the special 'delete-all' command instead of
          * DELETE FROM to wipe prior rows (there's no underlying content table).
@@ -890,7 +1122,14 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         }
 
         cbm_store_close(hash_store);
+        if (fingerprint_rc != 0 || metadata_rc != CBM_STORE_OK) {
+            cbm_log_error("pipeline.err", "phase", "persist_metadata");
+            return CBM_NOT_FOUND;
+        }
         cbm_log_info("pass.timing", "pass", "persist_hashes", "files", itoa_buf(file_count));
+    } else {
+        cbm_log_error("pipeline.err", "phase", "open_dumped_store");
+        return CBM_NOT_FOUND;
     }
     free(p->saved_adr);
     p->saved_adr = NULL;
@@ -951,12 +1190,14 @@ static int run_githistory(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
 static int run_tests_and_history(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                                  const cbm_file_info_t *files, int file_count) {
     struct timespec t;
+    cbm_pipeline_progress_update(p, "tests", "", 0, file_count);
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     CBM_PROF_START(t_tests);
     int rc = cbm_pipeline_pass_tests(ctx, files, file_count);
     CBM_PROF_END_N("pipeline", "pass_tests", t_tests, file_count);
     cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
     if (rc == 0 && !check_cancel(p)) {
+        cbm_pipeline_progress_update(p, "git_history", "", 0, file_count);
         CBM_PROF_START(t_gh);
         rc = run_githistory(p, ctx);
         CBM_PROF_END("pipeline", "pass_githistory", t_gh);
@@ -981,6 +1222,7 @@ static int run_post_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
 
     if (!check_cancel(p)) {
         struct timespec t;
+        cbm_pipeline_progress_update(p, "writing", "", file_count, file_count);
         CBM_PROF_START(t_dump);
         rc = dump_and_persist_hashes(p, files, file_count, &t);
         CBM_PROF_END("pipeline", "4_dump_and_persist", t_dump);
@@ -1019,6 +1261,15 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     if (!p) {
         return CBM_NOT_FOUND;
     }
+
+    if (check_cancel(p)) {
+        cbm_pipeline_progress_update(p, "cancelled", "", 0, 0);
+        return CBM_NOT_FOUND;
+    }
+
+    cbm_clock_gettime(CLOCK_MONOTONIC, &p->progress_started_at);
+    p->progress_heartbeat_at = p->progress_started_at;
+    cbm_pipeline_progress_update(p, "discovering", "", 0, 0);
 
     CBM_PROF_START(t_pipeline_total);
     struct timespec t0;
@@ -1063,11 +1314,14 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         rc = CBM_NOT_FOUND;
         goto cleanup;
     }
+    cbm_pipeline_progress_update(p, "structure", "", 0, file_count);
 
     /* Check for existing DB → try incremental or delete for reindex */
     rc = try_incremental_or_delete_db(p, files, file_count);
     if (rc >= 0) {
         cbm_discover_free(files, file_count);
+        cbm_pipeline_progress_update(p, rc == 0 ? "completed" : "error", "", file_count,
+                                     file_count);
         return rc;
     }
     cbm_log_info("pipeline.route", "path", "full");
@@ -1082,6 +1336,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
 
     /* Build shared context for pass functions */
     cbm_pipeline_ctx_t ctx = {
+        .pipeline = p,
         .project_name = p->project_name,
         .repo_path = p->repo_path,
         .gbuf = p->gbuf,
@@ -1119,5 +1374,12 @@ cleanup:
     cbm_set_user_lang_config(NULL);
     cbm_userconfig_free(p->userconfig);
     p->userconfig = NULL;
+    if (check_cancel(p)) {
+        cbm_pipeline_progress_update(p, "cancelled", "", p->progress_done, p->progress_total);
+    } else if (rc == 0) {
+        cbm_pipeline_progress_update(p, "completed", "", file_count, file_count);
+    } else {
+        cbm_pipeline_progress_update(p, "error", "", p->progress_done, p->progress_total);
+    }
     return rc;
 }

@@ -105,7 +105,7 @@ static int reformat_files(const char *subdir, int max_files) {
 
 static char *index_repo(void) {
     char args[512];
-    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", g_repodir);
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"background\":false}", g_repodir);
     return cbm_mcp_handle_tool(g_srv, "index_repository", args);
 }
 
@@ -1941,7 +1941,8 @@ TEST(tool_err_delete_nonexistent) {
 
 TEST(tool_index_mode_fast) {
     double ms;
-    char *r = call_tool_timed("index_repository", &ms, "{\"repo_path\":\"%s\",\"mode\":\"fast\"}",
+    char *r = call_tool_timed("index_repository", &ms,
+                              "{\"repo_path\":\"%s\",\"mode\":\"fast\",\"background\":false}",
                               g_repodir);
     ASSERT(r != NULL);
     ASSERT(strstr(r, "indexed") != NULL);
@@ -2809,7 +2810,8 @@ TEST(tool_err_ingest_no_traces) {
 
 TEST(tool_index_mode_full) {
     double ms;
-    char *r = call_tool_timed("index_repository", &ms, "{\"repo_path\":\"%s\",\"mode\":\"full\"}",
+    char *r = call_tool_timed("index_repository", &ms,
+                              "{\"repo_path\":\"%s\",\"mode\":\"full\",\"background\":false}",
                               g_repodir);
     ASSERT(r != NULL);
     ASSERT(strstr(r, "indexed") != NULL);
@@ -2846,7 +2848,8 @@ TEST(tool_delete_and_verify) {
     }
 
     double ms;
-    char *r = call_tool_timed("index_repository", &ms, "{\"repo_path\":\"%s\"}", tmpdir2);
+    char *r = call_tool_timed("index_repository", &ms,
+                              "{\"repo_path\":\"%s\",\"background\":false}", tmpdir2);
     TOOL_OK(r, ms);
     free(r);
 

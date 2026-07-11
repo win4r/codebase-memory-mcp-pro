@@ -509,6 +509,24 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
     cbm_arena_init(&result->arena);
     CBMArena *a = &result->arena;
 
+    result->module_qn = cbm_fqn_module(a, project, rel_path);
+    result->is_test_file = cbm_is_test_file(rel_path, language);
+
+    if (language == CBM_LANG_T100_4GL) {
+        CBMExtractCtx ctx = {
+            .arena = a,
+            .result = result,
+            .source = source,
+            .source_len = source_len,
+            .language = language,
+            .project = project,
+            .rel_path = rel_path,
+            .module_qn = result->module_qn,
+        };
+        cbm_extract_t100_4gl(&ctx);
+        return result;
+    }
+
     // Get language spec
     const CBMLangSpec *spec = cbm_lang_spec(language);
     if (!spec) {
@@ -566,10 +584,6 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
     }
 
     TSNode root = ts_tree_root_node(tree);
-
-    // Compute module QN
-    result->module_qn = cbm_fqn_module(a, project, rel_path);
-    result->is_test_file = cbm_is_test_file(rel_path, language);
 
     // Build extraction context
     CBMExtractCtx ctx = {
