@@ -4239,16 +4239,22 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
     }
 }
 
+static bool return_clause_has_aggregate(const cbm_return_clause_t *clause) {
+    if (!clause) {
+        return false;
+    }
+    for (int i = 0; i < clause->count; i++) {
+        if (is_aggregate_func(clause->items[i].func)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Project RETURN clause results */
 static void execute_return_clause(cbm_query_t *q, cbm_return_clause_t *ret, binding_t *bindings,
                                   int bind_count, int max_rows, result_builder_t *rb) {
-    bool has_agg = false;
-    for (int i = 0; i < ret->count; i++) {
-        if (is_aggregate_func(ret->items[i].func)) {
-            has_agg = true;
-            break;
-        }
-    }
+    bool has_agg = return_clause_has_aggregate(ret);
 
     if (ret->star) {
         execute_return_star(q, bindings, bind_count, max_rows, rb);
@@ -4272,10 +4278,16 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
                           result_builder_t *rb) {
     cbm_pattern_t *pat0 = &q->patterns[0];
 
+    /* Aggregates must see the full input set; max_rows only limits final output rows. */
+    int evaluation_max_rows = max_rows;
+    if (return_clause_has_aggregate(q->ret)) {
+        evaluation_max_rows = CYPHER_RESULT_CEILING;
+    }
+
     /* Step 1: Scan initial nodes */
     cbm_node_t *scanned = NULL;
     int scan_count = 0;
-    scan_pattern_nodes(store, project, max_rows, &pat0->nodes[0], &scanned, &scan_count);
+    scan_pattern_nodes(store, project, evaluation_max_rows, &pat0->nodes[0], &scanned, &scan_count);
 
     /* Build initial bindings with early WHERE */
     int bind_cap = scan_count > max_rows ? scan_count : (max_rows > 0 ? max_rows : SKIP_ONE);
@@ -4300,7 +4312,8 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
                         q->pattern_optional[0]);
 
     /* Step 2b: Additional patterns */
-    expand_additional_patterns(store, q, project, max_rows, &bindings, &bind_count, &bind_cap);
+    expand_additional_patterns(store, q, project, evaluation_max_rows, &bindings, &bind_count,
+                               &bind_cap);
 
     /* Step 3: Late WHERE */
     if (q->where && (pat0->rel_count > 0 || q->pattern_count > SKIP_ONE)) {
