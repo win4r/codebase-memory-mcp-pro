@@ -88,6 +88,11 @@ enum {
 /* Directory permissions: rwxr-xr-x */
 #define ADR_DIR_PERMS 0755
 
+/* Keep the advertised ADR write mode and every agent-facing hint sourced from
+ * one token. A duplicated literal previously drifted to the nonexistent
+ * `store` mode even though the MCP schema only accepts `update`. */
+#define ADR_UPDATE_MODE "update"
+
 /* JSON-RPC 2.0 standard error codes */
 #define JSONRPC_PARSE_ERROR (-32700)
 #define JSONRPC_METHOD_NOT_FOUND (-32601)
@@ -459,7 +464,7 @@ static const tool_def_t TOOLS[] = {
 
     {"manage_adr", "Create or update Architecture Decision Records",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"mode\":{\"type\":"
-     "\"string\",\"enum\":[\"get\",\"update\",\"sections\"]},\"content\":{\"type\":\"string\"},"
+     "\"string\",\"enum\":[\"get\",\"" ADR_UPDATE_MODE "\",\"sections\"]},\"content\":{\"type\":\"string\"},"
      "\"sections\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"project\"]"
      "}"},
 
@@ -1146,7 +1151,7 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
         if (!adr_exists) {
             yyjson_mut_obj_add_str(
                 doc, root, "adr_hint",
-                "No ADR found. Use manage_adr(mode='update') to persist architectural "
+                "No ADR found. Use manage_adr(mode='" ADR_UPDATE_MODE "') to persist architectural "
                 "decisions across sessions. Run get_architecture(aspects=['all']) first.");
         }
         cbm_project_free_fields(&proj_info);
@@ -2692,7 +2697,7 @@ static void build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
             doc, root, "adr_hint",
             "Project indexed. Consider creating an Architecture Decision Record: "
             "explore the codebase with get_architecture(aspects=['all']), then use "
-            "manage_adr(mode='store') to persist architectural insights across sessions.");
+            "manage_adr(mode='" ADR_UPDATE_MODE "') to persist architectural insights across sessions.");
     }
 
     bool has_artifact = cbm_artifact_exists(repo_path);
@@ -4404,7 +4409,7 @@ static char *adr_read_legacy_file(const char *root_path) {
 }
 
 #define ADR_EMPTY_HINT                                                             \
-    "No ADR yet. Create one with manage_adr(mode='update', "                       \
+    "No ADR yet. Create one with manage_adr(mode='" ADR_UPDATE_MODE "', "           \
     "content='## PURPOSE\\n...\\n\\n## STACK\\n...\\n\\n## ARCHITECTURE\\n..."     \
     "\\n\\n## PATTERNS\\n...\\n\\n## TRADEOFFS\\n...\\n\\n## PHILOSOPHY\\n...'). " \
     "For guided creation: explore the codebase with get_architecture, "            \

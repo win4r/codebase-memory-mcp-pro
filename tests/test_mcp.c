@@ -183,6 +183,10 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
     ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
+    /* The mode named in ADR guidance is sourced from the same constant as this
+     * schema. `store` was once emitted by index_repository but never accepted. */
+    ASSERT_NOT_NULL(strstr(json, "\"update\""));
+    ASSERT_NULL(strstr(json, "\"store\""));
     free(json);
     PASS();
 }
