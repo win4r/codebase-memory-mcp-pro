@@ -176,6 +176,7 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "get_code_snippet"));
     ASSERT_NOT_NULL(strstr(json, "get_graph_schema"));
     ASSERT_NOT_NULL(strstr(json, "get_architecture"));
+    ASSERT_NOT_NULL(strstr(json, "compact overview by default (all summary aspects)"));
     ASSERT_NOT_NULL(strstr(json, "search_code"));
     ASSERT_NOT_NULL(strstr(json, "list_projects"));
     ASSERT_NOT_NULL(strstr(json, "delete_project"));

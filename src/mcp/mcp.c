@@ -401,7 +401,9 @@ static const tool_def_t TOOLS[] = {
 
     {"get_architecture",
      "Get high-level architecture overview — packages, services, dependencies, and project "
-     "structure at a glance. Includes 'clusters': Leiden community detection over the call/import "
+     "structure at a glance. Returns a compact overview by default (all summary aspects); pass "
+     "aspects to select only the sections you need. Includes 'clusters': Leiden community detection "
+     "over the call/import "
      "graph, surfacing the de-facto modules (each with a label, member count, cohesion score, "
      "representative top_nodes, and the packages/edge_types that bind it) — use these to grasp "
      "the real architectural seams, which often cut across the folder layout.",
