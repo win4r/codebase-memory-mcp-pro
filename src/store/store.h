@@ -385,6 +385,12 @@ void cbm_store_search_free(cbm_search_output_t *out);
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out);
 
+/* Page through a stable BFS ordering. result_offset counts traversal rows (not
+ * the root node); callers may request one extra row to detect continuation. */
+int cbm_store_bfs_page(cbm_store_t *s, int64_t start_id, const char *direction,
+                       const char **edge_types, int edge_type_count, int max_depth,
+                       int max_results, int result_offset, cbm_traverse_result_t *out);
+
 /* Free a traverse result's allocated memory. */
 void cbm_store_traverse_free(cbm_traverse_result_t *out);
 

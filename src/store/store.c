@@ -2651,7 +2651,17 @@ static void bfs_build_types_clause(int edge_type_count, char *buf, int buf_sz) {
 
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
+    return cbm_store_bfs_page(s, start_id, direction, edge_types, edge_type_count, max_depth,
+                              max_results, 0, out);
+}
+
+int cbm_store_bfs_page(cbm_store_t *s, int64_t start_id, const char *direction,
+                       const char **edge_types, int edge_type_count, int max_depth,
+                       int max_results, int result_offset, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
+    if (result_offset < 0) {
+        return CBM_STORE_ERR;
+    }
 
     cbm_node_t root = {0};
     int rc = cbm_store_find_node_by_id(s, start_id, &root);
@@ -2691,9 +2701,10 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
              "FROM bfs "
              "JOIN nodes n ON n.id = bfs.node_id "
              "WHERE bfs.hop > 0 " /* exclude root */
-             "ORDER BY bfs.hop "
-             "LIMIT %d;",
-             (long long)start_id, next_id, join_cond, types_clause, max_depth, max_results);
+             "ORDER BY bfs.hop, n.id "
+             "LIMIT %d OFFSET %d;",
+             (long long)start_id, next_id, join_cond, types_clause, max_depth, max_results,
+             result_offset);
 
     sqlite3_stmt *stmt = NULL;
     rc = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);

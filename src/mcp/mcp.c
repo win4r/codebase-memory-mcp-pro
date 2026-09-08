@@ -68,6 +68,7 @@ enum {
 #endif
 #include <yyjson/yyjson.h>
 #include <stdint.h> // int64_t
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -384,7 +385,9 @@ static const tool_def_t TOOLS[] = {
      "\"},\"include_tests\":{\"type\":\"boolean\",\"default\":false,"
      "\"description\":\"Include test files in results. When false (default), test files are "
      "filtered out. When true, test nodes are included with is_test=true marker."
-     "\"}},\"required\":[\"function_name\",\"project\"]}"},
+     "\"},\"cursor\":{\"type\":\"string\",\"description\":\"Continuation cursor returned "
+     "when a trace response is truncated. Reuse it with the same trace arguments.\"}},"
+     "\"required\":[\"function_name\",\"project\"]}"},
 
     {"get_code_snippet",
      "Read source code for a function/class/symbol. IMPORTANT: First call search_graph to find the "
@@ -2240,9 +2243,9 @@ static bool is_test_file(const char *path) {
 
 /* Convert BFS traversal results into a yyjson_mut array. */
 static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_result_t *tr,
-                                         bool risk_labels, bool include_tests) {
+                                         bool risk_labels, bool include_tests, int result_limit) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    for (int i = 0; i < tr->visited_count; i++) {
+    for (int i = 0; i < tr->visited_count && i < result_limit; i++) {
         const char *fp = tr->visited[i].node.file_path;
         bool test = is_test_file(fp);
         if (!include_tests && test) {
@@ -2265,6 +2268,73 @@ static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_resul
         yyjson_mut_arr_add_val(arr, item);
     }
     return arr;
+}
+
+typedef struct {
+    int64_t root_id;
+    int outbound_offset;
+    int inbound_offset;
+    unsigned long long fingerprint;
+} trace_cursor_t;
+
+/* FNV-1a keeps the cursor compact while binding it to all result-shaping
+ * trace arguments and to the indexed project revision. */
+static unsigned long long trace_cursor_hash_add(unsigned long long hash, const char *value) {
+    const unsigned char *p = (const unsigned char *)(value ? value : "");
+    while (*p) {
+        hash ^= *p++;
+        hash *= 1099511628211ULL;
+    }
+    return hash ^ 0xffU;
+}
+
+static unsigned long long trace_cursor_fingerprint(cbm_store_t *store, const char *project,
+                                                   const char *function_name, const char *direction,
+                                                   int depth, const char *mode, const char *parameter_name,
+                                                   const char **edge_types, int edge_type_count,
+                                                   bool risk_labels, bool include_tests) {
+    char number[32];
+    unsigned long long hash = 1469598103934665603ULL;
+    hash = trace_cursor_hash_add(hash, project);
+    hash = trace_cursor_hash_add(hash, function_name);
+    hash = trace_cursor_hash_add(hash, direction);
+    hash = trace_cursor_hash_add(hash, mode);
+    hash = trace_cursor_hash_add(hash, parameter_name);
+    snprintf(number, sizeof(number), "%d:%d:%d:%d", depth, edge_type_count, risk_labels,
+             include_tests);
+    hash = trace_cursor_hash_add(hash, number);
+    for (int i = 0; i < edge_type_count; i++) {
+        hash = trace_cursor_hash_add(hash, edge_types[i]);
+    }
+
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(store, project, &proj) == CBM_STORE_OK) {
+        hash = trace_cursor_hash_add(hash, proj.indexed_at);
+        hash = trace_cursor_hash_add(hash, proj.root_path);
+        cbm_project_free_fields(&proj);
+    }
+    return hash;
+}
+
+static bool trace_cursor_parse(const char *cursor, trace_cursor_t *out) {
+    int consumed = 0;
+    long long root_id = 0;
+    if (!cursor || !out ||
+        sscanf(cursor, "tp1:%lld:%d:%d:%llx%n", &root_id, &out->outbound_offset,
+               &out->inbound_offset, &out->fingerprint, &consumed) != 4 ||
+        cursor[consumed] != '\0' || root_id <= 0 || out->outbound_offset < -1 ||
+        out->inbound_offset < -1 || out->outbound_offset > INT_MAX - MCP_BFS_LIMIT ||
+        out->inbound_offset > INT_MAX - MCP_BFS_LIMIT) {
+        return false;
+    }
+    out->root_id = (int64_t)root_id;
+    return true;
+}
+
+static void trace_cursor_format(char *out, size_t out_size, int64_t root_id, int outbound_offset,
+                                int inbound_offset, unsigned long long fingerprint) {
+    snprintf(out, out_size, "tp1:%lld:%d:%d:%016llx", (long long)root_id, outbound_offset,
+             inbound_offset, fingerprint);
 }
 
 static char *snippet_suggestions(const char *input, cbm_node_t *nodes, int count);
@@ -2334,6 +2404,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     char *direction = cbm_mcp_get_string_arg(args, "direction");
     char *mode = cbm_mcp_get_string_arg(args, "mode");
     char *param_name = cbm_mcp_get_string_arg(args, "parameter_name");
+    char *cursor = cbm_mcp_get_string_arg(args, "cursor");
     int depth = cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_DEPTH);
     bool risk_labels = cbm_mcp_get_bool_arg(args, "risk_labels");
     bool include_tests = cbm_mcp_get_bool_arg(args, "include_tests");
@@ -2343,6 +2414,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         free(direction);
         free(mode);
         free(param_name);
+        free(cursor);
         return cbm_mcp_text_result("function_name is required", true);
     }
     if (!store) {
@@ -2354,6 +2426,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         free(direction);
         free(mode);
         free(param_name);
+        free(cursor);
         return _res;
     }
 
@@ -2364,11 +2437,23 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         free(direction);
         free(mode);
         free(param_name);
+        free(cursor);
         return not_indexed;
     }
 
     if (!direction) {
         direction = heap_strdup("both");
+    }
+
+    trace_cursor_t trace_cursor = {0};
+    if (cursor && !trace_cursor_parse(cursor, &trace_cursor)) {
+        free(func_name);
+        free(project);
+        free(direction);
+        free(mode);
+        free(param_name);
+        free(cursor);
+        return cbm_mcp_text_result("{\"error\":\"invalid trace cursor\"}", true);
     }
 
     /* Find the node by name. If the bare-name lookup misses, fall back to
@@ -2407,6 +2492,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         free(direction);
         free(mode);
         free(param_name);
+        free(cursor);
         cbm_store_free_nodes(nodes, 0);
         return cbm_mcp_text_result(hint, true);
     }
@@ -2423,6 +2509,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         free(direction);
         free(mode);
         free(param_name);
+        free(cursor);
         cbm_store_free_nodes(nodes, node_count);
         return result;
     }
@@ -2442,6 +2529,26 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     int edge_type_count = 0;
     yyjson_doc *et_doc_keep = resolve_trace_edge_types(args, mode, edge_types, &edge_type_count);
 
+    unsigned long long cursor_fingerprint =
+        trace_cursor_fingerprint(store, project, func_name, direction, depth, mode, param_name, edge_types,
+                                 edge_type_count, risk_labels, include_tests);
+    if (cursor && (trace_cursor.root_id != nodes[sel].id ||
+                   trace_cursor.fingerprint != cursor_fingerprint)) {
+        yyjson_mut_doc_free(doc);
+        cbm_store_free_nodes(nodes, node_count);
+        free(func_name);
+        free(project);
+        free(direction);
+        free(mode);
+        free(param_name);
+        free(cursor);
+        if (et_doc_keep) {
+            yyjson_doc_free(et_doc_keep);
+        }
+        return cbm_mcp_text_result(
+            "{\"error\":\"trace cursor is stale or does not match the trace parameters\"}", true);
+    }
+
     /* Run BFS for each requested direction.
      * IMPORTANT: yyjson_mut_obj_add_str borrows pointers — we must keep
      * traversal results alive until after yy_doc_to_str serialization. */
@@ -2450,19 +2557,47 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
 
     cbm_traverse_result_t tr_out = {0};
     cbm_traverse_result_t tr_in = {0};
+    int out_offset = cursor ? trace_cursor.outbound_offset : 0;
+    int in_offset = cursor ? trace_cursor.inbound_offset : 0;
+    int next_out_offset = -1;
+    int next_in_offset = -1;
 
     if (do_outbound) {
-        cbm_store_bfs(store, nodes[sel].id, "outbound", edge_types, edge_type_count, depth,
-                      MCP_BFS_LIMIT, &tr_out);
-        yyjson_mut_obj_add_val(doc, root, "callees",
-                               bfs_to_json_array(doc, &tr_out, risk_labels, include_tests));
+        if (out_offset >= 0) {
+            cbm_store_bfs_page(store, nodes[sel].id, "outbound", edge_types, edge_type_count, depth,
+                               MCP_BFS_LIMIT + 1, out_offset, &tr_out);
+            yyjson_mut_obj_add_val(doc, root, "callees",
+                                   bfs_to_json_array(doc, &tr_out, risk_labels, include_tests,
+                                                     MCP_BFS_LIMIT));
+            if (tr_out.visited_count > MCP_BFS_LIMIT) {
+                next_out_offset = out_offset + MCP_BFS_LIMIT;
+            }
+        } else {
+            yyjson_mut_obj_add_val(doc, root, "callees", yyjson_mut_arr(doc));
+        }
     }
 
     if (do_inbound) {
-        cbm_store_bfs(store, nodes[sel].id, "inbound", edge_types, edge_type_count, depth,
-                      MCP_BFS_LIMIT, &tr_in);
-        yyjson_mut_obj_add_val(doc, root, "callers",
-                               bfs_to_json_array(doc, &tr_in, risk_labels, include_tests));
+        if (in_offset >= 0) {
+            cbm_store_bfs_page(store, nodes[sel].id, "inbound", edge_types, edge_type_count, depth,
+                               MCP_BFS_LIMIT + 1, in_offset, &tr_in);
+            yyjson_mut_obj_add_val(doc, root, "callers",
+                                   bfs_to_json_array(doc, &tr_in, risk_labels, include_tests,
+                                                     MCP_BFS_LIMIT));
+            if (tr_in.visited_count > MCP_BFS_LIMIT) {
+                next_in_offset = in_offset + MCP_BFS_LIMIT;
+            }
+        } else {
+            yyjson_mut_obj_add_val(doc, root, "callers", yyjson_mut_arr(doc));
+        }
+    }
+
+    if (next_out_offset >= 0 || next_in_offset >= 0) {
+        char next_cursor[128];
+        trace_cursor_format(next_cursor, sizeof(next_cursor), nodes[sel].id, next_out_offset,
+                            next_in_offset, cursor_fingerprint);
+        yyjson_mut_obj_add_bool(doc, root, "truncated", true);
+        yyjson_mut_obj_add_strcpy(doc, root, "next_cursor", next_cursor);
     }
 
     /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */
@@ -2483,6 +2618,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     free(direction);
     free(mode);
     free(param_name);
+    free(cursor);
     if (et_doc_keep) {
         yyjson_doc_free(et_doc_keep);
     }
