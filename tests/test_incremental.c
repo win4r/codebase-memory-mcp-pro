@@ -1859,6 +1859,8 @@ TEST(tool_ingest_traces_empty) {
     char *r =
         call_tool_timed("ingest_traces", &ms, "{\"project\":\"%s\",\"traces\":[]}", g_project);
     TOOL_OK(r, ms);
+    ASSERT(strstr(r, "not_implemented") != NULL);
+    ASSERT(strstr(r, "\"isError\":true") != NULL);
     free(r);
     PASS();
 }
@@ -1869,6 +1871,8 @@ TEST(tool_ingest_traces_basic) {
         "ingest_traces", &ms,
         "{\"project\":\"%s\",\"traces\":[{\"caller\":\"a\",\"callee\":\"b\"}]}", g_project);
     TOOL_OK(r, ms);
+    ASSERT(strstr(r, "not_implemented") != NULL);
+    ASSERT(strstr(r, "\"isError\":true") != NULL);
     free(r);
     PASS();
 }
@@ -2296,6 +2300,8 @@ TEST(tool_ingest_traces_multiple) {
                               "]}",
                               g_project);
     TOOL_OK(r, ms);
+    ASSERT(strstr(r, "not_implemented") != NULL);
+    ASSERT(strstr(r, "\"isError\":true") != NULL);
     free(r);
     PASS();
 }
@@ -2749,6 +2755,8 @@ TEST(tool_ingest_traces_partial) {
         call_tool_timed("ingest_traces", &ms,
                         "{\"project\":\"%s\",\"traces\":[{\"caller\":\"onlyA\"}]}", g_project);
     TOOL_OK(r, ms);
+    ASSERT(strstr(r, "not_implemented") != NULL);
+    ASSERT(strstr(r, "\"isError\":true") != NULL);
     free(r);
     PASS();
 }
@@ -2784,13 +2792,15 @@ TEST(tool_err_adr_bad_project) {
     PASS();
 }
 
-/* ── Error: ingest_traces bad project ──────────────────────────── */
+/* ── ingest_traces: implementation status does not depend on project lookup ── */
 
 TEST(tool_err_ingest_bad_project) {
     double ms;
     char *r =
         call_tool_timed("ingest_traces", &ms, "{\"project\":\"nonexistent-xyz\",\"traces\":[]}");
     TOOL_OK(r, ms);
+    ASSERT(strstr(r, "not_implemented") != NULL);
+    ASSERT(strstr(r, "\"isError\":true") != NULL);
     free(r);
     PASS();
 }
@@ -2801,6 +2811,8 @@ TEST(tool_err_ingest_no_traces) {
     double ms;
     char *r = call_tool_timed("ingest_traces", &ms, "{\"project\":\"%s\"}", g_project);
     TOOL_OK(r, ms);
+    ASSERT(strstr(r, "missing required argument: traces") != NULL);
+    ASSERT(strstr(r, "\"isError\":true") != NULL);
     free(r);
     PASS();
 }
