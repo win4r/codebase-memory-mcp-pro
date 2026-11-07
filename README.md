@@ -1,3 +1,5 @@
+# [🚀观看我的哔哩哔哩视频](https://space.bilibili.com/3493277319825652)
+
 # codebase-memory-mcp-pro
 
 > **🔱 Fork notice** — `codebase-memory-mcp-pro` is a community fork of [**DeusData/codebase-memory-mcp**](https://github.com/DeusData/codebase-memory-mcp) (MIT License, © 2025 DeusData), maintained by [@win4r](https://github.com/win4r). It tracks upstream and integrates the following fixes ahead of their upstream merge:
