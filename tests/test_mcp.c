@@ -1102,10 +1102,12 @@ TEST(tool_ingest_traces_basic) {
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":37,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"ingest_traces\","
-             "\"arguments\":{\"traces\":[{\"caller\":\"a\",\"callee\":\"b\"}]}}}");
+             "\"arguments\":{\"project\":\"trace-project\","
+             "\"traces\":[{\"caller\":\"a\",\"callee\":\"b\"}]}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "accepted"));
-    ASSERT_NOT_NULL(strstr(resp, "traces_received"));
+    ASSERT_NOT_NULL(strstr(resp, "not_implemented"));
+    ASSERT_NOT_NULL(strstr(resp, "\"isError\":true"));
+    ASSERT_NULL(strstr(resp, "accepted"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -1120,7 +1122,17 @@ TEST(tool_ingest_traces_empty) {
                                    "\"params\":{\"name\":\"ingest_traces\","
                                    "\"arguments\":{\"traces\":[]}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "accepted"));
+    ASSERT_NOT_NULL(strstr(resp, "missing required argument: project"));
+    ASSERT_NOT_NULL(strstr(resp, "\"isError\":true"));
+    free(resp);
+
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":39,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"ingest_traces\","
+             "\"arguments\":{\"project\":\"trace-project\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "missing required argument: traces"));
+    ASSERT_NOT_NULL(strstr(resp, "\"isError\":true"));
     free(resp);
 
     cbm_mcp_server_free(srv);

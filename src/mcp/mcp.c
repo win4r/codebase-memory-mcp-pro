@@ -463,7 +463,7 @@ static const tool_def_t TOOLS[] = {
      "\"sections\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"project\"]"
      "}"},
 
-    {"ingest_traces", "Ingest runtime traces to enhance the knowledge graph",
+    {"ingest_traces", "Runtime trace ingestion is not yet implemented; calls return not_implemented.",
      "{\"type\":\"object\",\"properties\":{\"traces\":{\"type\":\"array\",\"items\":{\"type\":"
      "\"object\"}},\"project\":{\"type\":"
      "\"string\"}},\"required\":[\"traces\",\"project\"]}"},
@@ -4491,34 +4491,33 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
 
 static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     (void)srv;
-    /* Parse traces array from JSON args */
     yyjson_doc *adoc = yyjson_read(args, strlen(args), 0);
-    int trace_count = 0;
-
-    if (adoc) {
-        yyjson_val *aroot = yyjson_doc_get_root(adoc);
-        yyjson_val *traces = yyjson_obj_get(aroot, "traces");
-        if (traces && yyjson_is_arr(traces)) {
-            trace_count = (int)yyjson_arr_size(traces);
+    if (!adoc || !yyjson_is_obj(yyjson_doc_get_root(adoc))) {
+        if (adoc) {
+            yyjson_doc_free(adoc);
         }
-        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "{\"status\":\"invalid_arguments\",\"error\":\"arguments must be a JSON object\"}", true);
     }
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
+    yyjson_val *aroot = yyjson_doc_get_root(adoc);
+    yyjson_val *project = yyjson_obj_get(aroot, "project");
+    yyjson_val *traces = yyjson_obj_get(aroot, "traces");
+    if (!project || !yyjson_is_str(project)) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "{\"status\":\"invalid_arguments\",\"error\":\"missing required argument: project\"}", true);
+    }
+    if (!traces || !yyjson_is_arr(traces)) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "{\"status\":\"invalid_arguments\",\"error\":\"missing required argument: traces\"}", true);
+    }
+    yyjson_doc_free(adoc);
 
-    yyjson_mut_obj_add_str(doc, root, "status", "accepted");
-    yyjson_mut_obj_add_int(doc, root, "traces_received", trace_count);
-    yyjson_mut_obj_add_str(doc, root, "note",
-                           "Runtime edge creation from traces not yet implemented");
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return cbm_mcp_text_result(
+        "{\"status\":\"not_implemented\",\"error\":\"Runtime trace ingestion is not implemented\"}",
+        true);
 }
 
 /* ── Tool dispatch ────────────────────────────────────────────── */
