@@ -683,6 +683,114 @@ TEST(tool_trace_call_path_prefers_definition) {
     PASS();
 }
 
+/* A trace page must advertise a usable cursor, and the cursor must continue
+ * after the previous BFS row without silently changing query parameters. */
+TEST(tool_trace_path_cursor_continues_without_duplicates) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "trace-cursor-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/tmp/trace-cursor"), CBM_STORE_OK);
+
+    cbm_node_t root = {.project = proj,
+                       .label = "Function",
+                       .name = "trace_root",
+                       .qualified_name = "trace-cursor.trace_root",
+                       .file_path = "trace.c",
+                       .start_line = 1,
+                       .end_line = 2};
+    int64_t root_id = cbm_store_upsert_node(st, &root);
+    ASSERT_GT(root_id, 0);
+    for (int i = 0; i < 101; i++) {
+        char name[32];
+        char qualified_name[64];
+        snprintf(name, sizeof(name), "leaf%03d", i);
+        snprintf(qualified_name, sizeof(qualified_name), "trace-cursor.%s", name);
+        cbm_node_t leaf = {.project = proj,
+                           .label = "Function",
+                           .name = name,
+                           .qualified_name = qualified_name,
+                           .file_path = "trace.c",
+                           .start_line = i + 10,
+                           .end_line = i + 10};
+        int64_t leaf_id = cbm_store_upsert_node(st, &leaf);
+        ASSERT_GT(leaf_id, 0);
+        cbm_edge_t edge = {
+            .project = proj, .source_id = root_id, .target_id = leaf_id, .type = "CALLS"};
+        ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+    }
+
+    const char *first_request =
+        "{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"trace_root\","
+        "\"project\":\"trace-cursor-proj\",\"direction\":\"outbound\",\"depth\":1}}}";
+    char *raw_first = cbm_mcp_server_handle(srv, first_request);
+    char *first = extract_text_content(raw_first);
+    ASSERT_NOT_NULL(first);
+    yyjson_doc *first_doc = yyjson_read(first, strlen(first), 0);
+    ASSERT_NOT_NULL(first_doc);
+    yyjson_val *first_root = yyjson_doc_get_root(first_doc);
+    yyjson_val *first_callees = yyjson_obj_get(first_root, "callees");
+    yyjson_val *truncated = yyjson_obj_get(first_root, "truncated");
+    yyjson_val *next_cursor = yyjson_obj_get(first_root, "next_cursor");
+    ASSERT_EQ(yyjson_arr_size(first_callees), 100);
+    ASSERT_TRUE(yyjson_get_bool(truncated));
+    ASSERT_TRUE(yyjson_is_str(next_cursor));
+    const char *cursor = yyjson_get_str(next_cursor);
+    ASSERT_NOT_NULL(cursor);
+
+    char second_request[512];
+    snprintf(second_request, sizeof(second_request),
+             "{\"jsonrpc\":\"2.0\",\"id\":202,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"trace_root\","
+             "\"project\":\"trace-cursor-proj\",\"direction\":\"outbound\",\"depth\":1,"
+             "\"cursor\":\"%s\"}}}",
+             cursor);
+    char *raw_second = cbm_mcp_server_handle(srv, second_request);
+    char *second = extract_text_content(raw_second);
+    ASSERT_NOT_NULL(second);
+    yyjson_doc *second_doc = yyjson_read(second, strlen(second), 0);
+    ASSERT_NOT_NULL(second_doc);
+    yyjson_val *second_callees = yyjson_obj_get(yyjson_doc_get_root(second_doc), "callees");
+    ASSERT_EQ(yyjson_arr_size(second_callees), 1);
+    yyjson_val *only_leaf = yyjson_arr_get(second_callees, 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(only_leaf, "name")), "leaf100");
+    for (size_t i = 0; i < yyjson_arr_size(first_callees); i++) {
+        yyjson_val *first_leaf = yyjson_arr_get(first_callees, i);
+        ASSERT_TRUE(strcmp(yyjson_get_str(yyjson_obj_get(first_leaf, "name")), "leaf100") != 0);
+    }
+
+    char mismatch_request[512];
+    snprintf(mismatch_request, sizeof(mismatch_request),
+             "{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"trace_root\","
+             "\"project\":\"trace-cursor-proj\",\"direction\":\"outbound\",\"depth\":2,"
+             "\"cursor\":\"%s\"}}}",
+             cursor);
+    char *raw_mismatch = cbm_mcp_server_handle(srv, mismatch_request);
+    char *mismatch = extract_text_content(raw_mismatch);
+    ASSERT_NOT_NULL(strstr(mismatch, "cursor"));
+
+    /* A project revision invalidates outstanding cursors instead of shifting a page. */
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/tmp/trace-cursor-reindexed"), CBM_STORE_OK);
+    char *raw_stale = cbm_mcp_server_handle(srv, second_request);
+    char *stale = extract_text_content(raw_stale);
+    ASSERT_NOT_NULL(strstr(stale, "stale"));
+
+    free(stale);
+    free(raw_stale);
+    free(mismatch);
+    free(raw_mismatch);
+    yyjson_doc_free(second_doc);
+    free(second);
+    free(raw_second);
+    yyjson_doc_free(first_doc);
+    free(first);
+    free(raw_first);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(tool_delete_project_not_found) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -2381,6 +2489,7 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_missing_function_name);
     RUN_TEST(tool_trace_call_path_ambiguous);
     RUN_TEST(tool_trace_call_path_prefers_definition);
+    RUN_TEST(tool_trace_path_cursor_continues_without_duplicates);
     RUN_TEST(tool_delete_project_not_found);
     RUN_TEST(tool_get_architecture_empty);
     RUN_TEST(tool_get_architecture_emits_populated_sections);
