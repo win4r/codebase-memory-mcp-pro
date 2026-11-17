@@ -1521,6 +1521,14 @@ TEST(cypher_apply_limit) {
     ASSERT_EQ(r.row_count, 10);
     cbm_cypher_result_free(&r);
 
+    /* max_rows limits result rows, not the input set of an aggregate. */
+    memset(&r, 0, sizeof(r));
+    rc = cbm_cypher_execute(s, "MATCH (n) RETURN count(n)", "lim", 3, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "50");
+    cbm_cypher_result_free(&r);
+
     /* LIMIT above max_rows → explicit limit wins */
     memset(&r, 0, sizeof(r));
     rc = cbm_cypher_execute(s, "MATCH (f:Function) RETURN f.name LIMIT 30", "lim", 10, &r);
